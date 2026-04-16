@@ -1,0 +1,62 @@
+[package]
+name = "wraith"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Protobuf
+prost = "0.14"
+prost-types = "0.14"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "io-std", "signal", "process", "fs"] }
+
+# Logging
+log = "0.4"
+simplelog = "0.12"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Multiplexing
+yamux = "0.13"
+
+# Encryption
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+anyhow = "1"
+base64 = "0.22"
+local_ipaddress = "0.1"
+hostname = "0.4"
+
+# Async utilities
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+async-trait = "0.1"
+
+# TUN (Linux)
+tokio-tun = "0.4"
+
+# Netlink for TUN config
+rtnetlink = "0.13"
+
+# Owned TLS
+rustls = "0.23"
+
+[build-dependencies]
+prost-build = "0.14"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"

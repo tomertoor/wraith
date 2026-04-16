@@ -1,0 +1,23 @@
+# Build output
+target/
+
+# Rust
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+
+# Python (for PyWraith)
+PyWraith/__pycache__/
+PyWraith/venv/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.swp
+*.swo
+*~

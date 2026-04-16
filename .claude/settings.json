@@ -1,0 +1,13 @@
+{
+  "enabledPlugins": {
+    "voltagent-core-dev@voltagent-subagents": true,
+    "voltagent-dev-exp@voltagent-subagents": true,
+    "superpowers@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash"
+    ]
+  }
+}
