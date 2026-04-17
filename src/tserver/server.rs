@@ -1,7 +1,7 @@
-//! Relay server — accepts agent connections and manages tunnels.
+//! Tunnel server — accepts agent connections and manages tunnels.
 
 use crate::proto::*;
-use crate::tunnel::channel::{TUNNEL_CONTROL, TUNNEL_DATA, RELAY_DATA, RELAY_CONTROL};
+use crate::tunnel::channel::{TUNNEL_CONTROL, TUNNEL_DATA, FORWARD_DATA, FORWARD_CONTROL};
 use crate::tunnel::multiplex::encode_frame;
 use crate::wraith::Config;
 use futures::stream::StreamExt;
@@ -15,12 +15,12 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux::{Config as YamuxConfig, Connection, ConnectionError, Mode};
 
-/// Active tunnel state on the relay side.
+/// Active tunnel state on the tunnel server side.
 #[derive(Debug)]
 pub struct Tunnel {
     pub tunnel_id: String,
     pub agent_ip: String,
-    pub relay_ip: String,
+    pub tserver_ip: String,
     pub netmask: String,
     pub channels: TunnelChannels,
 }
@@ -31,16 +31,16 @@ pub struct TunnelChannels {
     pub data_tx: mpsc::Sender<Vec<u8>>,
 }
 
-/// Relay server — listens for agent connections and manages tunnels.
-pub struct RelayServer {
+/// Tunnel server — listens for agent connections and manages tunnels.
+pub struct TunnelServer {
     config: Config,
     tunnels: Arc<RwLock<HashMap<String, Tunnel>>>,
     /// Channel to send inbound tunnel data packets for TUN writing.
-    /// The relay main loop consumes this and writes to the TUN device.
+    /// The tunnel server main loop consumes this and writes to the TUN device.
     tun_write_tx: Option<mpsc::Sender<(String, Vec<u8>)>>,
 }
 
-impl RelayServer {
+impl TunnelServer {
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -49,16 +49,16 @@ impl RelayServer {
         }
     }
 
-    /// Set the TUN write channel. The relay main loop should read from this
+    /// Set the TUN write channel. The tunnel server main loop should read from this
     /// channel and write packets to the TUN device.
     pub fn set_tun_write_channel(&mut self, tx: mpsc::Sender<(String, Vec<u8>)>) {
         self.tun_write_tx = Some(tx);
     }
 
-    /// Start the relay server listening on the configured address.
+    /// Start the tunnel server listening on the configured address.
     pub async fn run(&mut self, listen_addr: &str) -> anyhow::Result<()> {
         let listener = TcpListener::bind(listen_addr).await?;
-        log::info!("Relay server listening on {}", listen_addr);
+        log::info!("Tunnel server listening on {}", listen_addr);
 
         loop {
             match listener.accept().await {
@@ -162,7 +162,7 @@ async fn handle_stream(
                 let tunnel = Tunnel {
                     tunnel_id: open.tunnel_id.clone(),
                     agent_ip: open.agent_tun_ip.clone(),
-                    relay_ip: open.relay_tun_ip.clone(),
+                    tserver_ip: open.relay_tun_ip.clone(),
                     netmask: open.tunnel_netmask.clone(),
                     channels: TunnelChannels {
                         control_tx: ctrl_tx.clone(),
@@ -199,7 +199,7 @@ async fn handle_stream(
             }
         }
         TUNNEL_DATA => {
-            // Forward tunnel data to the relay TUN device via the write channel.
+            // Forward tunnel data to the TUN device via the write channel.
             if let Ok(tunnel_data) = TunnelData::decode(&data[..]) {
                 log::trace!(
                     "Tunnel data for {}: {} bytes",
@@ -213,14 +213,13 @@ async fn handle_stream(
                 }
             }
         }
-        RELAY_DATA => {
-            // Relay data channel — forward to the target service.
-            log::trace!("Relay data channel received {} bytes", data.len());
-            // TODO: Implement relay data forwarding — decode RelayData proto and
-            // forward to the target TCP/UDP socket.
+        FORWARD_DATA => {
+            // Forward data channel — port-forward traffic to the target service.
+            log::trace!("Forward data channel received {} bytes", data.len());
+            // TODO: Implement forward data bridging — decode and forward to target TCP/UDP socket.
         }
-        RELAY_CONTROL => {
-            // Relay control channel — handle RelayOpen, RelayClose, etc.
+        FORWARD_CONTROL => {
+            // Forward control channel — handle RelayOpen, RelayClose, etc. (proto-compatible)
             if let Ok(open) = RelayOpen::decode(&data[..]) {
                 log::info!("RelayOpen: {} mode={} local={} remote={}", open.relay_id, open.mode, open.local_addr, open.remote_addr);
                 let ack = RelayOpenAck {
@@ -231,14 +230,14 @@ async fn handle_stream(
                 };
                 let mut buf = Vec::new();
                 ack.encode(&mut buf)?;
-                let framed = encode_frame(RELAY_CONTROL, &buf);
+                let framed = encode_frame(FORWARD_CONTROL, &buf);
                 futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
             } else if let Ok(close) = RelayClose::decode(&data[..]) {
                 log::info!("RelayClose: {} ({})", close.relay_id, close.reason);
             } else if let Ok(stats) = RelayStats::decode(&data[..]) {
                 log::debug!("RelayStats: {}", stats.relay_id);
             } else {
-                log::warn!("Unknown relay control message, {} bytes", data.len());
+                log::warn!("Unknown forward control message, {} bytes", data.len());
             }
         }
         _ => {
