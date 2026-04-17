@@ -1,3 +1,0 @@
-pub mod relay;
-
-pub use relay::SocatRelay;

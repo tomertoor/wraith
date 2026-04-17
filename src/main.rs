@@ -1,28 +1,27 @@
 //! Wraith — Modular Reverse Tunneling Tool
 //!
 //! Usage:
-//!     wraith c2 <addr>        Connect to Nexus C2 server
-//!     wraith listen [addr]    Listen for peer connections
-//!     wraith connect <addr>   Connect to a peer
-//!     wraith direct           Run as PyWraith subprocess (JSONL stdin/stdout)
+//!     wraith agent <c2_addr>          Run as agent, connect to C2 server (PyWraith)
+//!     wraith listen [addr]           Listen for peer connections
+//!     wraith connect <addr>          Connect to a peer
+//!     wraith forward <lport> <rhost:rport>  One-shot TCP port forward
 //!
-//! All tunnel and relay management is done via PyWraith through the network.
+//! Tunnel and relay management is done via PyWraith through the C2 channel.
 
 mod agent;
-mod direct;
 mod peer;
 mod platform;
 mod proto;
 mod relay;
-mod socat;
+mod tserver;
 mod transport;
 mod tunnel;
 mod wraith;
 
 use anyhow::Result;
 use clap::Parser;
-use direct::run_direct;
 use peer::{run_connect, run_listen};
+use relay::SocatRelay;
 use wraith::Config;
 
 // ─── CLI ───────────────────────────────────────────────────────────────────
@@ -32,10 +31,10 @@ use wraith::Config;
 #[command(version = "0.2.0")]
 #[command(about = "Modular reverse tunneling tool for penetration testing")]
 enum Cli {
-    /// Connect to a Nexus C2 server.
-    C2 {
-        /// Nexus C2 server address (e.g., "nexus:8080" or "10.0.0.1:8080").
-        addr: String,
+    /// Run as agent, connecting to a C2 server (PyWraith).
+    Agent {
+        /// C2 server address (e.g., "localhost:9000").
+        c2_addr: String,
     },
     /// Listen for incoming peer connections.
     Listen {
@@ -48,8 +47,15 @@ enum Cli {
         /// Peer address to connect to.
         addr: String,
     },
-    /// Run as subprocess controlled by PyWraith via stdin/stdout JSONL.
-    Direct,
+    /// One-shot TCP port forward: listen on lport and bridge to rhost:rport.
+    Forward {
+        /// Local port to listen on.
+        lport: u16,
+        /// Remote host and port (e.g., "192.168.1.1:80").
+        rhost: String,
+        /// Remote port.
+        rport: u16,
+    },
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -60,8 +66,8 @@ async fn main() -> Result<()> {
     setup_logging("info");
 
     match cli {
-        Cli::C2 { addr } => {
-            run_c2(&addr).await?;
+        Cli::Agent { c2_addr } => {
+            run_agent(&c2_addr).await?;
         }
         Cli::Listen { addr } => {
             run_listen(&addr, None, "10.8.0.1/24").await?;
@@ -69,8 +75,8 @@ async fn main() -> Result<()> {
         Cli::Connect { addr } => {
             run_connect(&addr, None, "10.8.0.1/24").await?;
         }
-        Cli::Direct => {
-            run_direct().await?;
+        Cli::Forward { lport, rhost, rport } => {
+            run_forward(lport, &rhost, rport).await?;
         }
     }
 
@@ -88,18 +94,21 @@ fn setup_logging(_level: &str) {
     );
 }
 
-// ─── C2 ────────────────────────────────────────────────────────────────────
+// ─── Agent ────────────────────────────────────────────────────────────────────
 
-async fn run_c2(c2_addr: &str) -> Result<()> {
-    log::info!("Starting Wraith C2 agent → {}", c2_addr);
+async fn run_agent(c2_addr: &str) -> Result<()> {
+    log::info!("Starting Wraith agent, connecting to C2 at {}", c2_addr);
 
     let (c2_host, c2_port) = Config::parse_addr(c2_addr);
+
+    // Load defaults then override from CLI
+    let base = Config::from_args();
 
     let config = Config {
         c2_addr: Some(c2_addr.to_string()),
         tunnel_addr: None,
-        relay_host: "127.0.0.1".to_string(),
-        relay_port: 4446,
+        tunnel_host: base.tunnel_host,
+        tunnel_port: base.tunnel_port,
         c2_host,
         c2_port,
         reconnect: true,
@@ -113,6 +122,24 @@ async fn run_c2(c2_addr: &str) -> Result<()> {
     let mut client = agent::AgentClient::new(config);
     client.connect_with_reconnect().await?;
     client.run_dual().await?;
+
+    Ok(())
+}
+
+// ─── Forward ──────────────────────────────────────────────────────────────────
+
+async fn run_forward(lport: u16, rhost: &str, rport: u16) -> Result<()> {
+    let local_addr = format!("0.0.0.0:{}", lport);
+    let remote_addr = format!("{}:{}", rhost, rport);
+    let forward_id = format!("fwd-{}", uuid::Uuid::new_v4());
+
+    log::info!("Starting forward {}: {} -> {}", forward_id, local_addr, remote_addr);
+
+    let mut socat = SocatRelay::new();
+    socat.start_relay(&forward_id, "tcp", &local_addr, &remote_addr).await?;
+
+    // Keep running — the forward tasks run in background
+    tokio::signal::ctrl_c().await?;
 
     Ok(())
 }

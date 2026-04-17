@@ -1,8 +1,11 @@
 //! Wraith symmetric peer connection module.
 //!
 //! Provides peer-to-peer connections via `wraith listen` and `wraith connect`.
-//! Both sides use Yamux streams with channels 0=TUNNEL_DATA, 1=TUNNEL_CONTROL,
-//! 3=RELAY_DATA, 5=RELAY_CONTROL.
+//! Both sides use Yamux streams with channels:
+//! - 0 (TUNNEL_DATA): raw IP packets for VPN tunnel
+//! - 1 (TUNNEL_CONTROL): tunnel open/close/keepalive messages
+//! - 3 (FORWARD_DATA): raw bytes for port-forward traffic
+//! - 5 (FORWARD_CONTROL): forward open/close messages
 
 pub mod handshake;
 
@@ -21,7 +24,8 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::{Config, Connection, ConnectionError, Mode};
 
 use crate::proto::*;
-use crate::tunnel::channel::{RELAY_CONTROL, RELAY_DATA, TUNNEL_CONTROL, TUNNEL_DATA};
+use crate::relay::SocatRelay;
+use crate::tunnel::channel::{FORWARD_CONTROL, FORWARD_DATA, TUNNEL_CONTROL, TUNNEL_DATA};
 use crate::tunnel::multiplex::encode_frame;
 
 use handshake::create_peer_info;
@@ -38,9 +42,9 @@ pub struct TunnelState {
     pub bytes_out: u64,
 }
 
-/// Represents the state of an active relay.
+/// Represents the state of an active port forward.
 #[derive(Debug, Clone)]
-pub struct RelayState {
+pub struct ForwardState {
     pub relay_id: String,
     pub mode: String,
     pub local_addr: String,
@@ -50,7 +54,7 @@ pub struct RelayState {
 /// A symmetric peer connection.
 ///
 /// After connection establishment, both sides run the same code
-/// to handle inbound Yamux streams and dispatch to tunnel/relay handlers.
+/// to handle inbound Yamux streams and dispatch to tunnel/forward handlers.
 #[derive(Debug)]
 pub struct PeerConnection {
     pub node_id: String,
@@ -58,12 +62,14 @@ pub struct PeerConnection {
     pub is_initiator: bool,
     pub peer_info: Option<handshake::PeerInfo>,
     pub tunnels: HashMap<String, TunnelState>,
-    pub relays: HashMap<String, RelayState>,
+    pub forwards: HashMap<String, ForwardState>,
     /// Local TUN IP for tunnels created on this node.
     tun_ip: Option<String>,
     /// Local netmask for TUN interfaces.
     netmask: Option<u8>,
     yamux: Option<Connection<Compat<TcpStream>>>,
+    /// Port forwarding manager for relay-style TCP/UDP bridging.
+    port_forward: SocatRelay,
 }
 
 /// Helper future for polling Yamux inbound streams.
@@ -123,10 +129,11 @@ impl PeerConnection {
             is_initiator: true,
             peer_info: None,
             tunnels: HashMap::new(),
-            relays: HashMap::new(),
+            forwards: HashMap::new(),
             tun_ip: Some(tun_ip.to_string()),
             netmask: Some(netmask),
             yamux: Some(yamux),
+            port_forward: SocatRelay::new(),
         };
 
         // Exchange PeerInfo: open outbound stream, send our info, read peer info
@@ -162,10 +169,11 @@ impl PeerConnection {
             is_initiator,
             peer_info: None,
             tunnels: HashMap::new(),
-            relays: HashMap::new(),
+            forwards: HashMap::new(),
             tun_ip: tun_ip.map(String::from),
             netmask,
             yamux: Some(yamux),
+            port_forward: SocatRelay::new(),
         };
 
         // Exchange PeerInfo with the initiator
@@ -218,9 +226,9 @@ impl PeerConnection {
     /// (channel_id + length) followed by the payload. The payload format
     /// depends on the channel:
     /// - Channel 0 (TUNNEL_DATA): TunnelData protobuf — raw IP packet to forward
-    /// - Channel 1 (TUNNEL_CONTROL): TunnelOpen/TunnelClose/Keepalive protobuf
-    /// - Channel 3 (RELAY_DATA): raw bytes for port-forward relay
-    /// - Channel 5 (RELAY_CONTROL): RelayOpen/RelayClose protobuf
+    /// - Channel 1 (TUNNEL_CONTROL): TunnelControl wrapper with open/close/keepalive
+    /// - Channel 3 (FORWARD_DATA): raw bytes for port-forward relay
+    /// - Channel 5 (FORWARD_CONTROL): RelayControl wrapper with open/close
     pub async fn run(&mut self) -> Result<()> {
         let mut yamux = self.yamux.take().ok_or_else(|| anyhow::anyhow!("already running"))?;
 
@@ -239,31 +247,108 @@ impl PeerConnection {
                     let mut data = vec![0u8; len];
                     futures::io::AsyncReadExt::read_exact(&mut stream, &mut data).await?;
 
-                    // Spawn a task to handle this stream so we don't block the loop
+                    // RelayControl messages need to start the actual listener before
+                    // we spawn the stream handler, so handle them inline here.
+                    if channel_id == FORWARD_CONTROL {
+                        let relay_msg = match RelayControl::decode(&data[..]) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                log::warn!("Failed to decode RelayControl: {}", e);
+                                continue;
+                            }
+                        };
+
+                        use crate::proto::relay_control::Msg;
+                        match relay_msg.msg {
+                            Some(Msg::Open(open)) => {
+                                log::info!("RelayOpen from peer: {} mode={} local={} remote={}",
+                                    open.relay_id, open.mode, open.local_addr, open.remote_addr);
+
+                                // Start the actual TCP/UDP listener via SocatRelay
+                                if let Err(e) = self.port_forward.start_relay(
+                                    &open.relay_id,
+                                    &open.mode,
+                                    &open.local_addr,
+                                    &open.remote_addr,
+                                ).await {
+                                    log::error!("Failed to start relay {}: {}", open.relay_id, e);
+                                    // Send failure ack
+                                    let ack = RelayOpenAck {
+                                        relay_id: open.relay_id.clone(),
+                                        success: false,
+                                        error_msg: e.to_string(),
+                                        bound_addr: String::new(),
+                                    };
+                                    let mut buf = Vec::new();
+                                    ack.encode(&mut buf).ok();
+                                    let framed = encode_frame(FORWARD_CONTROL, &buf);
+                                    futures::io::AsyncWriteExt::write_all(&mut stream, &framed).await.ok();
+                                    futures::io::AsyncWriteExt::flush(&mut stream).await.ok();
+                                    continue;
+                                }
+
+                                self.forwards.insert(open.relay_id.clone(), ForwardState {
+                                    relay_id: open.relay_id.clone(),
+                                    mode: open.mode.clone(),
+                                    local_addr: open.local_addr.clone(),
+                                    remote_addr: open.remote_addr.clone(),
+                                });
+
+                                // Send success ack
+                                let ack = RelayOpenAck {
+                                    relay_id: open.relay_id,
+                                    success: true,
+                                    error_msg: String::new(),
+                                    bound_addr: open.local_addr.clone(),
+                                };
+                                let mut buf = Vec::new();
+                                if ack.encode(&mut buf).is_ok() {
+                                    let framed = encode_frame(FORWARD_CONTROL, &buf);
+                                    futures::io::AsyncWriteExt::write_all(&mut stream, &framed).await.ok();
+                                    futures::io::AsyncWriteExt::flush(&mut stream).await.ok();
+                                }
+                                continue;
+                            }
+                            Some(Msg::Close(close)) => {
+                                log::info!("RelayClose from peer: {} ({})", close.relay_id, close.reason);
+                                self.port_forward.stop_relay(&close.relay_id).await.ok();
+                                self.forwards.remove(&close.relay_id);
+                                // No ack needed for close
+                                continue;
+                            }
+                            _ => {
+                                // Stats, list, etc — ignore for now
+                                continue;
+                            }
+                        }
+                    }
+
+                    // For other channels, spawn handler task (don't block loop)
                     let tunnels = self.tunnels.clone();
-                    let relays = self.relays.clone();
+                    let forwards = self.forwards.clone();
                     let tun_ip = self.tun_ip.clone();
                     let netmask = self.netmask;
                     let is_initiator = self.is_initiator;
 
                     tokio::spawn(async move {
+                        // Errors are logged but don't kill the connection
                         if let Err(e) = Self::handle_stream(
                             channel_id,
                             &mut stream,
                             data,
                             tunnels,
-                            relays,
+                            forwards,
                             tun_ip,
                             netmask,
                             is_initiator,
                         ).await {
-                            log::warn!("Peer stream handler error on channel {}: {}", channel_id, e);
+                            log::warn!("Stream handler error on channel {}: {}", channel_id, e);
                         }
                     });
                 }
                 Some(Err(e)) => {
-                    log::error!("Yamux stream error: {}", e);
-                    break;
+                    // Yamux protocol error — log and keep running
+                    log::warn!("Yamux stream error: {}", e);
                 }
                 None => {
                     log::info!("Yamux connection closed by peer");
@@ -281,7 +366,7 @@ impl PeerConnection {
         stream: &mut yamux::Stream,
         data: Vec<u8>,
         mut tunnels: HashMap<String, TunnelState>,
-        mut relays: HashMap<String, RelayState>,
+        mut forwards: HashMap<String, ForwardState>,
         tun_ip: Option<String>,
         netmask: Option<u8>,
         _is_initiator: bool,
@@ -304,92 +389,109 @@ impl PeerConnection {
                 }
             }
             TUNNEL_CONTROL => {
-                // Channel 1: tunnel control messages
-                if let Ok(open) = TunnelOpen::decode(&data[..]) {
-                    log::info!("TunnelOpen from peer: {} (tun_ip={}, netmask={})",
-                        open.tunnel_id, open.relay_tun_ip, open.tunnel_netmask);
+                // Channel 1: tunnel control messages (wrapped in TunnelControl)
+                let ctrl = match TunnelControl::decode(&data[..]) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::warn!("Failed to decode TunnelControl: {}", e);
+                        return Ok(());
+                    }
+                };
 
-                    // Record the tunnel
-                    let tun_ip_str = tun_ip.clone().unwrap_or_else(|| open.agent_tun_ip.clone());
-                    let nm = netmask.unwrap_or(24);
-                    tunnels.insert(open.tunnel_id.clone(), TunnelState {
-                        tunnel_id: open.tunnel_id.clone(),
-                        tun_ip: open.agent_tun_ip.clone(),
-                        netmask: nm,
-                        bytes_out: 0,
-                    });
+                use crate::proto::tunnel_control::Msg;
+                match ctrl.msg {
+                    Some(Msg::Open(open)) => {
+                        log::info!("TunnelOpen from peer: {} (tun_ip={}, netmask={})",
+                            open.tunnel_id, open.relay_tun_ip, open.tunnel_netmask);
 
-                    // Send ack back on this stream
-                    let ack = TunnelOpenAck {
-                        tunnel_id: open.tunnel_id,
-                        success: true,
-                        error_msg: String::new(),
-                        assigned_ip: tun_ip_str,
-                    };
-                    let mut buf = Vec::new();
-                    ack.encode(&mut buf)?;
-                    let framed = encode_frame(TUNNEL_CONTROL, &buf);
-                    futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
-                    futures::io::AsyncWriteExt::flush(stream).await?;
+                        // Record the tunnel
+                        let tun_ip_str = tun_ip.clone().unwrap_or_else(|| open.agent_tun_ip.clone());
+                        let nm = netmask.unwrap_or(24);
+                        tunnels.insert(open.tunnel_id.clone(), TunnelState {
+                            tunnel_id: open.tunnel_id.clone(),
+                            tun_ip: open.agent_tun_ip.clone(),
+                            netmask: nm,
+                            bytes_out: 0,
+                        });
 
-                } else if let Ok(close) = TunnelClose::decode(&data[..]) {
-                    log::info!("TunnelClose from peer: {} ({})", close.tunnel_id, close.reason);
-                    tunnels.remove(&close.tunnel_id);
+                        // Send ack back on this stream
+                        let ack = TunnelOpenAck {
+                            tunnel_id: open.tunnel_id,
+                            success: true,
+                            error_msg: String::new(),
+                            assigned_ip: tun_ip_str,
+                        };
+                        let mut buf = Vec::new();
+                        ack.encode(&mut buf)?;
+                        let framed = encode_frame(TUNNEL_CONTROL, &buf);
+                        futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
+                        futures::io::AsyncWriteExt::flush(stream).await?;
 
-                } else if let Ok(_stats) = TunnelStats::decode(&data[..]) {
-                    log::debug!("TunnelStats from peer");
-                } else if let Ok(ka) = Keepalive::decode(&data[..]) {
-                    log::trace!("Keepalive from peer for tunnel {}", ka.tunnel_id);
-                    let ack = KeepaliveAck {
-                        tunnel_id: ka.tunnel_id,
-                        timestamp: ka.timestamp,
-                    };
-                    let mut buf = Vec::new();
-                    ack.encode(&mut buf)?;
-                    let framed = encode_frame(TUNNEL_CONTROL, &buf);
-                    futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
-                    futures::io::AsyncWriteExt::flush(stream).await?;
+                    }
+                    Some(Msg::Close(close)) => {
+                        log::info!("TunnelClose from peer: {} ({})", close.tunnel_id, close.reason);
+                        tunnels.remove(&close.tunnel_id);
+                    }
+                    Some(Msg::Keepalive(ka)) => {
+                        log::trace!("Keepalive from peer for tunnel {}", ka.tunnel_id);
+                        let ack = KeepaliveAck {
+                            tunnel_id: ka.tunnel_id,
+                            timestamp: ka.timestamp,
+                        };
+                        let mut buf = Vec::new();
+                        ack.encode(&mut buf)?;
+                        let framed = encode_frame(TUNNEL_CONTROL, &buf);
+                        futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
+                        futures::io::AsyncWriteExt::flush(stream).await?;
+                    }
+                    _ => {
+                        // Stats, StatsRequest, KeepaliveAck — ignore
+                    }
                 }
             }
-            RELAY_DATA => {
+            FORWARD_DATA => {
                 // Channel 3: relay data — raw bytes for port-forward
-                log::trace!("RELAY_DATA from peer: {} bytes", data.len());
+                log::trace!("FORWARD_DATA from peer: {} bytes", data.len());
                 // TODO: Forward to the target TCP/UDP socket
             }
-            RELAY_CONTROL => {
-                // Channel 5: relay control messages
-                if let Ok(open) = RelayOpen::decode(&data[..]) {
-                    log::info!("RelayOpen from peer: {} mode={} local={} remote={}",
-                        open.relay_id, open.mode, open.local_addr, open.remote_addr);
+            FORWARD_CONTROL => {
+                // Channel 5: relay control messages (always handled inline in run() now)
+                // This case should not be reached, but handle gracefully anyway
+                let ctrl = match RelayControl::decode(&data[..]) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::warn!("Failed to decode RelayControl in handle_stream: {}", e);
+                        return Ok(());
+                    }
+                };
 
-                    relays.insert(open.relay_id.clone(), RelayState {
-                        relay_id: open.relay_id.clone(),
-                        mode: open.mode.clone(),
-                        local_addr: open.local_addr.clone(),
-                        remote_addr: open.remote_addr.clone(),
-                    });
-
-                    // Send ack
-                    let ack = RelayOpenAck {
-                        relay_id: open.relay_id,
-                        success: true,
-                        error_msg: String::new(),
-                        bound_addr: String::new(),
-                    };
-                    let mut buf = Vec::new();
-                    ack.encode(&mut buf)?;
-                    let framed = encode_frame(RELAY_CONTROL, &buf);
-                    futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
-                    futures::io::AsyncWriteExt::flush(stream).await?;
-
-                } else if let Ok(close) = RelayClose::decode(&data[..]) {
-                    log::info!("RelayClose from peer: {} ({})", close.relay_id, close.reason);
-                    relays.remove(&close.relay_id);
-
-                } else if let Ok(_stats) = RelayStats::decode(&data[..]) {
-                    log::debug!("RelayStats from peer");
-                } else if let Ok(_list_req) = RelayList::decode(&data[..]) {
-                    log::debug!("RelayList request from peer");
+                use crate::proto::relay_control::Msg;
+                match ctrl.msg {
+                    Some(Msg::Open(open)) => {
+                        forwards.insert(open.relay_id.clone(), ForwardState {
+                            relay_id: open.relay_id.clone(),
+                            mode: open.mode.clone(),
+                            local_addr: open.local_addr.clone(),
+                            remote_addr: open.remote_addr.clone(),
+                        });
+                        let ack = RelayOpenAck {
+                            relay_id: open.relay_id,
+                            success: true,
+                            error_msg: String::new(),
+                            bound_addr: String::new(),
+                        };
+                        let mut buf = Vec::new();
+                        ack.encode(&mut buf)?;
+                        let framed = encode_frame(FORWARD_CONTROL, &buf);
+                        futures::io::AsyncWriteExt::write_all(stream, &framed).await?;
+                        futures::io::AsyncWriteExt::flush(stream).await?;
+                    }
+                    Some(Msg::Close(close)) => {
+                        forwards.remove(&close.relay_id);
+                    }
+                    _ => {
+                        // Stats, List, etc — ignore
+                    }
                 }
             }
             _ => {
@@ -408,31 +510,39 @@ impl PeerConnection {
         let yamux_conn = self.yamux.as_mut().ok_or_else(|| anyhow::anyhow!("connection not initialized"))?;
         let mut stream = PollOutbound { conn: yamux_conn }.await?;
 
-        let tunnel_open = TunnelOpen {
-            tunnel_id: tunnel_id.to_string(),
-            relay_tun_ip: tun_ip.to_string(),
-            agent_tun_ip: tun_ip.to_string(),
-            tunnel_netmask: netmask.to_string(),
-            routes: String::new(),
-            encryption: "chacha20".to_string(),
-            nonce: vec![0u8; 12],
+        // Wrap TunnelOpen in TunnelControl (matching what PyWraith sends)
+        let tunnel_msg = crate::proto::TunnelControl {
+            msg: Some(crate::proto::tunnel_control::Msg::Open(TunnelOpen {
+                tunnel_id: tunnel_id.to_string(),
+                relay_tun_ip: tun_ip.to_string(),
+                agent_tun_ip: tun_ip.to_string(),
+                tunnel_netmask: netmask.to_string(),
+                routes: String::new(),
+                encryption: "chacha20".to_string(),
+                nonce: vec![0u8; 12],
+            })),
         };
 
         let mut buf = Vec::new();
-        prost::Message::encode(&tunnel_open, &mut buf)?;
+        prost::Message::encode(&tunnel_msg, &mut buf)?;
         let frame = encode_frame(TUNNEL_CONTROL, &buf);
         stream.write_all(&frame).await?;
         stream.flush().await?;
 
-        // Read the ack from the stream
+        // Read the ack from the stream (also wrapped in TunnelControl)
         let mut header = [0u8; 8];
         futures::io::AsyncReadExt::read_exact(&mut stream, &mut header).await?;
         let ack_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
         let mut ack_data = vec![0u8; ack_len];
         futures::io::AsyncReadExt::read_exact(&mut stream, &mut ack_data).await?;
 
-        let ack = TunnelOpenAck::decode(&ack_data[..])
-            .map_err(|e| anyhow::anyhow!("failed to decode TunnelOpenAck: {}", e))?;
+        let ack_msg = crate::proto::TunnelControl::decode(&ack_data[..])
+            .map_err(|e| anyhow::anyhow!("failed to decode TunnelControl ack: {}", e))?;
+
+        let ack = match ack_msg.msg {
+            Some(crate::proto::tunnel_control::Msg::OpenAck(a)) => a,
+            _ => anyhow::bail!("unexpected ack type"),
+        };
 
         if !ack.success {
             anyhow::bail!("peer rejected tunnel: {}", ack.error_msg);
@@ -454,13 +564,15 @@ impl PeerConnection {
         let yamux_conn = self.yamux.as_mut().ok_or_else(|| anyhow::anyhow!("connection not initialized"))?;
         let mut stream = PollOutbound { conn: yamux_conn }.await?;
 
-        let tunnel_close = TunnelClose {
-            tunnel_id: tunnel_id.to_string(),
-            reason: "requested".to_string(),
+        let tunnel_msg = crate::proto::TunnelControl {
+            msg: Some(crate::proto::tunnel_control::Msg::Close(TunnelClose {
+                tunnel_id: tunnel_id.to_string(),
+                reason: "requested".to_string(),
+            })),
         };
 
         let mut buf = Vec::new();
-        prost::Message::encode(&tunnel_close, &mut buf)?;
+        prost::Message::encode(&tunnel_msg, &mut buf)?;
         let frame = encode_frame(TUNNEL_CONTROL, &buf);
         stream.write_all(&frame).await?;
         stream.flush().await?;
@@ -470,43 +582,51 @@ impl PeerConnection {
         Ok(())
     }
 
-    /// Open a relay with this peer.
-    pub async fn open_relay(&mut self, relay_id: &str, mode: &str, local_addr: &str, remote_addr: &str) -> anyhow::Result<()> {
+    /// Open a forward with this peer.
+    pub async fn open_forward(&mut self, relay_id: &str, mode: &str, local_addr: &str, remote_addr: &str) -> anyhow::Result<()> {
         let yamux_conn = self.yamux.as_mut().ok_or_else(|| anyhow::anyhow!("connection not initialized"))?;
         let mut stream = PollOutbound { conn: yamux_conn }.await?;
 
-        let relay_open = RelayOpen {
-            relay_id: relay_id.to_string(),
-            mode: mode.to_string(),
-            local_addr: local_addr.to_string(),
-            remote_addr: remote_addr.to_string(),
-            file_path: String::new(),
-            command: String::new(),
-            timeout: 300,
-            keepalive: true,
+        // Wrap RelayOpen in RelayControl (matching what PyWraith sends)
+        let relay_msg = crate::proto::RelayControl {
+            msg: Some(crate::proto::relay_control::Msg::Open(RelayOpen {
+                relay_id: relay_id.to_string(),
+                mode: mode.to_string(),
+                local_addr: local_addr.to_string(),
+                remote_addr: remote_addr.to_string(),
+                file_path: String::new(),
+                command: String::new(),
+                timeout: 300,
+                keepalive: true,
+            })),
         };
 
         let mut buf = Vec::new();
-        prost::Message::encode(&relay_open, &mut buf)?;
-        let frame = encode_frame(RELAY_CONTROL, &buf);
+        prost::Message::encode(&relay_msg, &mut buf)?;
+        let frame = encode_frame(FORWARD_CONTROL, &buf);
         stream.write_all(&frame).await?;
         stream.flush().await?;
 
-        // Read ack
+        // Read ack (also wrapped in RelayControl)
         let mut header = [0u8; 8];
         futures::io::AsyncReadExt::read_exact(&mut stream, &mut header).await?;
         let ack_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
         let mut ack_data = vec![0u8; ack_len];
         futures::io::AsyncReadExt::read_exact(&mut stream, &mut ack_data).await?;
 
-        let ack = RelayOpenAck::decode(&ack_data[..])
-            .map_err(|e| anyhow::anyhow!("failed to decode RelayOpenAck: {}", e))?;
+        let ack_msg = crate::proto::RelayControl::decode(&ack_data[..])
+            .map_err(|e| anyhow::anyhow!("failed to decode RelayControl ack: {}", e))?;
+
+        let ack = match ack_msg.msg {
+            Some(crate::proto::relay_control::Msg::OpenAck(a)) => a,
+            _ => anyhow::bail!("unexpected ack type"),
+        };
 
         if !ack.success {
             anyhow::bail!("peer rejected relay: {}", ack.error_msg);
         }
 
-        self.relays.insert(relay_id.to_string(), RelayState {
+        self.forwards.insert(relay_id.to_string(), ForwardState {
             relay_id: relay_id.to_string(),
             mode: mode.to_string(),
             local_addr: local_addr.to_string(),
@@ -517,23 +637,25 @@ impl PeerConnection {
         Ok(())
     }
 
-    /// Close a relay with this peer.
-    pub async fn close_relay(&mut self, relay_id: &str) -> anyhow::Result<()> {
+    /// Close a forward with this peer.
+    pub async fn close_forward(&mut self, relay_id: &str) -> anyhow::Result<()> {
         let yamux_conn = self.yamux.as_mut().ok_or_else(|| anyhow::anyhow!("connection not initialized"))?;
         let mut stream = PollOutbound { conn: yamux_conn }.await?;
 
-        let relay_close = RelayClose {
-            relay_id: relay_id.to_string(),
-            reason: "requested".to_string(),
+        let relay_msg = crate::proto::RelayControl {
+            msg: Some(crate::proto::relay_control::Msg::Close(RelayClose {
+                relay_id: relay_id.to_string(),
+                reason: "requested".to_string(),
+            })),
         };
 
         let mut buf = Vec::new();
-        prost::Message::encode(&relay_close, &mut buf)?;
-        let frame = encode_frame(RELAY_CONTROL, &buf);
+        prost::Message::encode(&relay_msg, &mut buf)?;
+        let frame = encode_frame(FORWARD_CONTROL, &buf);
         stream.write_all(&frame).await?;
         stream.flush().await?;
 
-        self.relays.remove(relay_id);
+        self.forwards.remove(relay_id);
         log::info!("Relay {} closed", relay_id);
         Ok(())
     }
@@ -542,8 +664,8 @@ impl PeerConnection {
         self.tunnels.values().collect()
     }
 
-    pub fn list_relays(&self) -> Vec<&RelayState> {
-        self.relays.values().collect()
+    pub fn list_forwards(&self) -> Vec<&ForwardState> {
+        self.forwards.values().collect()
     }
 }
 
@@ -584,8 +706,24 @@ pub async fn run_connect(addr: &str, _tun_name: Option<&str>, tunnel_ip: &str) -
     let ip = parts[0];
     let netmask = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(24);
 
-    let mut conn = PeerConnection::connect(addr, ip, netmask).await?;
-    log::info!("Connected to peer {} (peer={:?})", addr, conn.peer_info.as_ref().map(|p| p.node_id.as_str()));
-    conn.run().await?;
-    Ok(())
+    loop {
+        log::info!("Connecting to peer at {}...", addr);
+        match PeerConnection::connect(addr, ip, netmask).await {
+            Ok(mut conn) => {
+                log::info!("Connected to peer {} (peer={:?})",
+                    addr, conn.peer_info.as_ref().map(|p| p.node_id.as_str()));
+                // run() blocks until the connection closes
+                // On disconnect, it returns Ok(()) — loop and reconnect
+                if let Err(e) = conn.run().await {
+                    log::error!("Peer connection error: {}", e);
+                }
+                log::info!("Peer disconnected. Reconnecting in 5s...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                log::error!("Failed to connect to {}: {}. Retrying in 5s...", addr, e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
 }

@@ -1,7 +1,7 @@
-//! Command handlers for the agent — tunnel and relay commands.
+//! Command handlers for the agent — tunnel and forward commands.
 
 use crate::proto::*;
-use crate::socat::relay::SocatRelay;
+use crate::relay::SocatRelay;
 use crate::wraith::Config;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 pub struct CommandHandler {
     config: Config,
     client: Arc<RwLock<Option<crate::agent::client::AgentClient>>>,
-    socat: Arc<RwLock<SocatRelay>>,
+    relay: Arc<RwLock<SocatRelay>>,
 }
 
 impl CommandHandler {
@@ -18,15 +18,15 @@ impl CommandHandler {
         Self {
             config,
             client: Arc::new(RwLock::new(None)),
-            socat: Arc::new(RwLock::new(SocatRelay::new())),
+            relay: Arc::new(RwLock::new(SocatRelay::new())),
         }
     }
 
-    /// Start the tunnel client and connect to relay.
-    pub async fn start_tunnel(&self, tunnel_id: &str, relay_ip: &str, agent_ip: &str, netmask: &str) -> anyhow::Result<()> {
+    /// Start the tunnel client and connect to tunnel server.
+    pub async fn start_tunnel(&self, tunnel_id: &str, tserver_ip: &str, agent_ip: &str, netmask: &str) -> anyhow::Result<()> {
         let mut client = crate::agent::client::AgentClient::new(self.config.clone());
         client.connect_with_reconnect().await?;
-        client.open_tunnel(tunnel_id, relay_ip, agent_ip, netmask).await?;
+        client.open_tunnel(tunnel_id, tserver_ip, agent_ip, netmask).await?;
         *self.client.write().await = Some(client);
         Ok(())
     }
@@ -57,23 +57,23 @@ impl CommandHandler {
         anyhow::bail!("tunnel not found")
     }
 
-    /// Start a relay (socat-style) on the agent.
-    pub async fn start_relay(&self, relay_id: &str, mode: &str, local_addr: &str, remote_addr: &str) -> anyhow::Result<()> {
-        let mut socat = self.socat.write().await;
-        socat.start_relay(relay_id, mode, local_addr, remote_addr).await?;
+    /// Start a port forward on the agent.
+    pub async fn start_forward(&self, forward_id: &str, mode: &str, local_addr: &str, remote_addr: &str) -> anyhow::Result<()> {
+        let mut relay = self.relay.write().await;
+        relay.start_relay(forward_id, mode, local_addr, remote_addr).await?;
         Ok(())
     }
 
-    /// Stop a relay.
-    pub async fn stop_relay(&self, relay_id: &str) -> anyhow::Result<()> {
-        let mut socat = self.socat.write().await;
-        socat.stop_relay(relay_id).await?;
+    /// Stop a forward.
+    pub async fn stop_forward(&self, forward_id: &str) -> anyhow::Result<()> {
+        let mut relay = self.relay.write().await;
+        relay.stop_relay(forward_id).await?;
         Ok(())
     }
 
-    /// List active relays.
-    pub async fn list_relays(&self) -> anyhow::Result<RelayListResponse> {
-        let socat = self.socat.read().await;
-        Ok(socat.list_relays())
+    /// List active forwards.
+    pub async fn list_forwards(&self) -> anyhow::Result<RelayListResponse> {
+        let relay = self.relay.read().await;
+        Ok(relay.list_relays().await)
     }
 }

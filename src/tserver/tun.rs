@@ -1,4 +1,4 @@
-//! TUN interface management for the relay side (requires root).
+//! TUN interface management for the tunnel server side (requires root).
 
 use std::io;
 use std::net::Ipv4Addr;

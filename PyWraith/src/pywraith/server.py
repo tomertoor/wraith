@@ -19,6 +19,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Any
 
+from .proto_gen import tunnel_pb2
+
 logger = logging.getLogger(__name__)
 
 
@@ -237,14 +239,16 @@ class WraithServer:
         # The peer is the "relay" side; we are the "agent" side
         tun_ip_str = tun_ip if "/" not in tun_ip else tun_ip.split("/")[0]
 
-        from .protocol import WraithProtocol
-        msg = WraithProtocol.create_tunnel_open(
-            tunnel_id=tunnel_id,
-            relay_tun_ip="10.8.0.1",  # peer's TUN IP
-            agent_tun_ip=tun_ip_str,   # our assigned IP
-            netmask=f"{netmask}",
+        # Build TunnelControl protobuf with open payload
+        tunnel_msg = tunnel_pb2.TunnelControl(
+            open=tunnel_pb2.TunnelOpen(
+                tunnel_id=tunnel_id,
+                relay_tun_ip="10.8.0.1",
+                agent_tun_ip=tun_ip_str,
+                tunnel_netmask=f"{netmask}",
+            )
         )
-        payload = msg.SerializeToString()
+        payload = tunnel_msg.SerializeToString()
         await self._send_frame(peer, CHANNEL_TUNNEL_CONTROL, payload)
 
         # Track locally
@@ -264,9 +268,10 @@ class WraithServer:
 
         peer = list(self.peers.values())[0]
 
-        from .protocol import WraithProtocol
-        msg = WraithProtocol.create_tunnel_close(tunnel_id, reason)
-        payload = msg.SerializeToString()
+        tunnel_msg = tunnel_pb2.TunnelControl(
+            close=tunnel_pb2.TunnelClose(tunnel_id=tunnel_id, reason=reason)
+        )
+        payload = tunnel_msg.SerializeToString()
         await self._send_frame(peer, CHANNEL_TUNNEL_CONTROL, payload)
 
         self.tunnels.pop(tunnel_id, None)
@@ -282,14 +287,15 @@ class WraithServer:
 
         peer = list(self.peers.values())[0]
 
-        from .protocol import WraithProtocol
-        msg = WraithProtocol.create_relay_open(
-            relay_id=relay_id,
-            mode=mode,
-            local_addr=local,
-            remote_addr=remote,
+        relay_msg = tunnel_pb2.RelayControl(
+            open=tunnel_pb2.RelayOpen(
+                relay_id=relay_id,
+                mode=mode,
+                local_addr=local,
+                remote_addr=remote,
+            )
         )
-        payload = msg.SerializeToString()
+        payload = relay_msg.SerializeToString()
         await self._send_frame(peer, CHANNEL_RELAY_CONTROL, payload)
 
         self.relays[relay_id] = RelayState(
@@ -307,9 +313,10 @@ class WraithServer:
 
         peer = list(self.peers.values())[0]
 
-        from .protocol import WraithProtocol
-        msg = WraithProtocol.create_relay_close(relay_id, reason)
-        payload = msg.SerializeToString()
+        relay_msg = tunnel_pb2.RelayControl(
+            close=tunnel_pb2.RelayClose(relay_id=relay_id, reason=reason)
+        )
+        payload = relay_msg.SerializeToString()
         await self._send_frame(peer, CHANNEL_RELAY_CONTROL, payload)
 
         self.relays.pop(relay_id, None)

