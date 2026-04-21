@@ -21,10 +21,10 @@ class WraithClient:
         """Connect to wraith server."""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5.0)
             self.socket.connect((self.host, self.port))
             return True
         except Exception as e:
-            print(f"Connection failed: {e}")
             return False
 
     def disconnect(self):
@@ -61,6 +61,7 @@ class WraithClient:
                     response = WraithProtocol.decode_message(response_data)
                     if response.msg_type == pb.COMMAND_RESULT:
                         return True, WraithProtocol.parse_command_result(response)
+                time.sleep(0.1)
 
             return False, {'error': 'Timeout waiting for response'}
         except Exception as e:
