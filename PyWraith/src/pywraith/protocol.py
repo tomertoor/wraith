@@ -52,15 +52,18 @@ class WraithProtocol:
         timeout: int = 30
     ) -> pb.WraithMessage:
         """Create a COMMAND message."""
-        msg = pb.WraithMessage()
-        msg.msg_type = pb.COMMAND
-        msg.message_id = command_id
-        msg.timestamp = int(time.time() * 1000)
-        msg.command.command_id = command_id
-        msg.command.action = action
-        if params:
-            msg.command.params.update(params)
-        msg.command.timeout = timeout
+        cmd = pb.Command(
+            command_id=command_id,
+            action=action,
+            params=params or {},
+            timeout=timeout
+        )
+        msg = pb.WraithMessage(
+            msg_type=pb.COMMAND,
+            message_id=command_id,
+            timestamp=int(time.time() * 1000),
+            command=cmd
+        )
         return msg
 
     @staticmethod
@@ -73,16 +76,20 @@ class WraithProtocol:
         error: str = ''
     ) -> pb.WraithMessage:
         """Create a COMMAND_RESULT message."""
-        msg = pb.WraithMessage()
-        msg.msg_type = pb.COMMAND_RESULT
-        msg.message_id = command_id
-        msg.timestamp = int(time.time() * 1000)
-        msg.result.command_id = command_id
-        msg.result.status = status
-        msg.result.output = output
-        msg.result.exit_code = exit_code
-        msg.result.duration_ms = duration_ms
-        msg.result.error = error
+        result = pb.CommandResult(
+            command_id=command_id,
+            status=status,
+            output=output,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            error=error
+        )
+        msg = pb.WraithMessage(
+            msg_type=pb.COMMAND_RESULT,
+            message_id=command_id,
+            timestamp=int(time.time() * 1000),
+            result=result
+        )
         return msg
 
     @staticmethod
@@ -93,14 +100,18 @@ class WraithProtocol:
         ip_address: str
     ) -> pb.WraithMessage:
         """Create REGISTRATION message."""
-        msg = pb.WraithMessage()
-        msg.msg_type = pb.REGISTRATION
-        msg.message_id = str(uuid.uuid4())
-        msg.timestamp = int(time.time() * 1000)
-        msg.registration.hostname = hostname
-        msg.registration.username = username
-        msg.registration.os = os
-        msg.registration.ip_address = ip_address
+        registration = pb.Registration(
+            hostname=hostname,
+            username=username,
+            os=os,
+            ip_address=ip_address
+        )
+        msg = pb.WraithMessage(
+            msg_type=pb.REGISTRATION,
+            message_id=str(uuid.uuid4()),
+            timestamp=int(time.time() * 1000),
+            registration=registration
+        )
         return msg
 
     @staticmethod
