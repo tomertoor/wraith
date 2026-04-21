@@ -1,11 +1,12 @@
 use anyhow::Result;
+use log::{error, info};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
-use log::{info, error};
 
 #[derive(Clone)]
 pub struct RelayConfig {
@@ -39,7 +40,6 @@ impl Relay {
     }
 }
 
-#[derive(Default)]
 pub struct RelayManager {
     relays: HashMap<String, Relay>,
 }
@@ -82,6 +82,7 @@ impl RelayManager {
     }
 }
 
+#[derive(Serialize)]
 pub struct RelayInfo {
     pub relay_id: String,
     pub listen_host: String,
@@ -155,13 +156,6 @@ pub async fn start_relay(
                                             }
                                         }
                                     };
-
-                                    if let Err(e) = result1 {
-                                        error!("Relay error: {}", e);
-                                    }
-                                    if let Err(e) = result2 {
-                                        error!("Relay error: {}", e);
-                                    }
                                 }
                                 Err(e) => error!("Failed to connect to forward: {}", e),
                             }

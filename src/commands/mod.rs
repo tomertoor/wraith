@@ -1,4 +1,4 @@
-use crate::proto::wraith::{Command, CommandResult, RelayCreate, RelayDelete, RelayListResponse};
+use crate::proto::wraith::{Command, CommandResult};
 use crate::relay::RelayManager;
 use anyhow::Result;
 use log::info;
