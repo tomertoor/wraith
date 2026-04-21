@@ -1,6 +1,4 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    prost_build::Config::new()
-        .out_dir("src/proto")
-        .compile_protos(&["proto/tunnel.proto"], &["proto/"])?;
+    prost_build::compile_protos(&["proto/wraith.proto"], &["proto/"])?;
     Ok(())
 }

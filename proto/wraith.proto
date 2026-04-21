@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package wraith;
+
+enum MessageType {
+    REGISTRATION = 0;
+    HEARTBEAT = 1;
+    COMMAND = 2;
+    COMMAND_RESULT = 3;
+    RELAY_CREATE = 4;
+    RELAY_DELETE = 5;
+    RELAY_LIST = 6;
+    RELAY_LIST_RESPONSE = 7;
+}
+
+message WraithMessage {
+    MessageType msg_type = 1;
+    string message_id = 2;
+    int64 timestamp = 3;
+    oneof payload {
+        Registration registration = 4;
+        Heartbeat heartbeat = 5;
+        Command command = 6;
+        CommandResult result = 7;
+        RelayCreate relay_create = 8;
+        RelayDelete relay_delete = 9;
+        RelayList relay_list = 10;
+        RelayListResponse relay_list_response = 11;
+    }
+}
+
+message Registration {
+    string hostname = 1;
+    string username = 2;
+    string os = 3;
+    string ip_address = 4;
+}
+
+message Heartbeat {
+    int64 last_command_time = 1;
+    string status = 2;
+}
+
+message Command {
+    string command_id = 1;
+    string action = 2;
+    map<string, string> params = 3;
+    int32 timeout = 4;
+}
+
+message CommandResult {
+    string command_id = 1;
+    string status = 2;
+    string output = 3;
+    int32 exit_code = 4;
+    int64 duration_ms = 5;
+    string error = 6;
+}
+
+message RelayCreate {
+    string relay_id = 1;
+    string listen_host = 2;
+    int32 listen_port = 3;
+    string forward_host = 4;
+    int32 forward_port = 5;
+}
+
+message RelayDelete {
+    string relay_id = 1;
+}
+
+message RelayList {}
+
+message RelayListResponse {
+    repeated RelayInfo relays = 1;
+}
+
+message RelayInfo {
+    string relay_id = 1;
+    string listen_host = 2;
+    int32 listen_port = 3;
+    string forward_host = 4;
+    int32 forward_port = 5;
+    bool active = 6;
+}
