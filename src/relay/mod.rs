@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,10 +29,25 @@ impl Relay {
             active: true,
         }
     }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
 }
 
+#[derive(Default)]
 pub struct RelayManager {
     relays: HashMap<String, Relay>,
+}
+
+impl Default for RelayManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RelayManager {
@@ -57,7 +73,7 @@ impl RelayManager {
             listen_port: r.config.listen_port,
             forward_host: r.config.forward_host.clone(),
             forward_port: r.config.forward_port,
-            active: r.active,
+            active: r.is_active(),
         }).collect()
     }
 
@@ -75,33 +91,86 @@ pub struct RelayInfo {
     pub active: bool,
 }
 
-pub async fn start_relay(listen_addr: String, forward_addr: String) -> Result<()> {
+pub async fn start_relay(
+    listen_addr: String,
+    forward_addr: String,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<()> {
     let listener = TcpListener::bind(&listen_addr).await?;
     info!("Relay listening on {}", listen_addr);
 
     loop {
-        match listener.accept().await {
-            Ok((mut inbound, _)) => {
-                let forward = forward_addr.clone();
-                tokio::spawn(async move {
-                    match TcpStream::connect(&forward).await {
-                        Ok(mut outbound) => {
-                            let (mut ri, mut wi) = inbound.split();
-                            let (mut ro, mut wo) = outbound.split();
-                            match tokio::io::copy(&mut ri, &mut wo).await {
-                                Ok(_) => {}
-                                Err(e) => error!("Relay error: {}", e),
-                            }
-                            match tokio::io::copy(&mut ro, &mut wi).await {
-                                Ok(_) => {}
-                                Err(e) => error!("Relay error: {}", e),
-                            }
-                        }
-                        Err(e) => error!("Failed to connect to forward: {}", e),
-                    }
-                });
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("Relay shutdown signal received");
+                break;
             }
-            Err(e) => error!("Failed to accept connection: {}", e),
+            result = listener.accept() => {
+                match result {
+                    Ok((mut inbound, _)) => {
+                        let forward = forward_addr.clone();
+                        tokio::spawn(async move {
+                            match TcpStream::connect(&forward).await {
+                                Ok(mut outbound) => {
+                                    let (mut ri, mut wi) = inbound.split();
+                                    let (mut ro, mut wo) = outbound.split();
+                                    let active = Arc::new(AtomicBool::new(true));
+                                    let active_clone = Arc::clone(&active);
+
+                                    let (result1, result2) = tokio::join! {
+                                        async move {
+                                            let mut buf = [0u8; 8192];
+                                            while active_clone.load(Ordering::SeqCst) {
+                                                match ri.read(&mut buf).await {
+                                                    Ok(0) => break,
+                                                    Ok(n) => {
+                                                        if wo.write_all(&buf[..n]).await.is_err() {
+                                                            active_clone.store(false, Ordering::SeqCst);
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(_) => {
+                                                        active_clone.store(false, Ordering::SeqCst);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        async move {
+                                            let mut buf = [0u8; 8192];
+                                            while active.load(Ordering::SeqCst) {
+                                                match ro.read(&mut buf).await {
+                                                    Ok(0) => break,
+                                                    Ok(n) => {
+                                                        if wi.write_all(&buf[..n]).await.is_err() {
+                                                            active.store(false, Ordering::SeqCst);
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(_) => {
+                                                        active.store(false, Ordering::SeqCst);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                    if let Err(e) = result1 {
+                                        error!("Relay error: {}", e);
+                                    }
+                                    if let Err(e) = result2 {
+                                        error!("Relay error: {}", e);
+                                    }
+                                }
+                                Err(e) => error!("Failed to connect to forward: {}", e),
+                            }
+                        });
+                    }
+                    Err(e) => error!("Failed to accept connection: {}", e),
+                }
+            }
         }
     }
+    Ok(())
 }
