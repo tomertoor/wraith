@@ -6,7 +6,7 @@ import cmd
 import argparse
 from typing import Optional
 
-from .client import WraithClient
+from PyWraith.client import WraithClient
 
 
 class WraithCLI(cmd.Cmd):

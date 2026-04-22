@@ -5,7 +5,7 @@ import time
 import uuid
 from typing import Optional, Dict, Any
 
-from .proto_gen import wraith_pb2 as pb
+from PyWraith.proto_gen import wraith_pb2 as pb
 
 
 class WraithProtocol:
