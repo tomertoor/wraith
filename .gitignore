@@ -1,23 +1,36 @@
-# Build output
-target/
-
-# Rust
+# Rust build artifacts
+/target/
 Cargo.lock
 
 # IDE
 .vscode/
 .idea/
-
-# Python (for PyWraith)
-PyWraith/__pycache__/
-PyWraith/venv/
-*.pyc
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
+# Python (PyWraith)
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+PyWraith/venv/
+
+# Plans (internal)
+docs/superpowers/plans/
+
+# Build output
+*.pb.go
+*.pb.rs
+
+# Logs
+*.log
+
 # Misc
-*.swp
-*.swo
-*~
+*.tmp

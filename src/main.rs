@@ -1,9 +1,10 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use clap::{Parser, Subcommand};
-use log::{error, info, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use prost::Message;
-use simplelog::{Config, WriteLogger};
+use simplelog::{CombinedLogger, ConfigBuilder, LevelFilter as SimplelogLevel, TermLogger, TerminalMode, WriteLogger};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +22,12 @@ use relay::RelayManager;
 #[command(name = "wraith")]
 #[command(about = "Wraith reverse tunneling tool", long_about = None)]
 struct Cli {
+    /// Enable debug logging
+    #[arg(short, long)]
+    debug: bool,
+    /// Log to file (in addition to terminal)
+    #[arg(short, long)]
+    log_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -238,7 +245,7 @@ impl WraithServer {
 }
 
 async fn run_server(addr: &str, relay_manager: Arc<Mutex<RelayManager>>) -> Result<()> {
-    let server = WraithServer::new(Arc::clone(&relay_manager));
+    let _server = WraithServer::new(Arc::clone(&relay_manager));
 
     let listener = TcpListener::bind(addr).await?;
     info!("Server listening on {}", addr);
@@ -261,19 +268,49 @@ async fn run_server(addr: &str, relay_manager: Arc<Mutex<RelayManager>>) -> Resu
     }
 }
 
+fn setup_logging(debug: bool, log_file: &Option<PathBuf>) -> Result<()> {
+    let level = if debug {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    };
+
+    let config = ConfigBuilder::new()
+        .set_target_level(SimplelogLevel::Off)
+        .build();
+
+    let mut loggers: Vec<Box<dyn simplelog::SharedLogger>> = vec![
+        TermLogger::new(
+            level,
+            config.clone(),
+            TerminalMode::Mixed,
+            simplelog::ColorChoice::Auto,
+        ),
+    ];
+
+    if let Some(path) = log_file {
+        loggers.push(WriteLogger::new(
+            level,
+            config,
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?,
+        ));
+    }
+
+    CombinedLogger::init(loggers)?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    WriteLogger::init(
-        LevelFilter::Info,
-        Config::default(),
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("wraith.log")?,
-    )?;
-
     let cli = Cli::parse();
+
+    setup_logging(cli.debug, &cli.log_file)?;
+
+    info!("Wraith starting up");
+    debug!("Debug logging enabled");
 
     match cli.command {
         Commands::CommandListen { address } => {

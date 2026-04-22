@@ -1,7 +1,7 @@
 use crate::proto::wraith::{Command, CommandResult};
 use crate::relay::RelayManager;
 use anyhow::Result;
-use log::info;
+use log::{debug, info, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -40,6 +40,8 @@ impl CommandHandler {
         let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
         let forward_port: i32 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
 
+        debug!("create_relay: listen={}:{}, forward={}:{}", listen_host, listen_port, forward_host, forward_port);
+
         let config = crate::relay::RelayConfig {
             listen_host,
             listen_port: listen_port as u16,
@@ -52,6 +54,7 @@ impl CommandHandler {
             manager.create_relay(config)
         };
 
+        info!("Created relay with id: {}", relay_id);
         Ok(CommandResult {
             command_id: cmd.command_id,
             status: "success".to_string(),
@@ -64,11 +67,18 @@ impl CommandHandler {
 
     async fn handle_delete_relay(&self, cmd: Command) -> Result<CommandResult> {
         let relay_id = cmd.params.get("relay_id").cloned().unwrap_or_default();
+        debug!("delete_relay: id={}", relay_id);
 
         let deleted = {
             let mut manager = self.relay_manager.lock().await;
             manager.delete_relay(&relay_id)
         };
+
+        if deleted {
+            info!("Deleted relay: {}", relay_id);
+        } else {
+            warn!("Failed to delete relay: {} (not found)", relay_id);
+        }
 
         Ok(CommandResult {
             command_id: cmd.command_id,
