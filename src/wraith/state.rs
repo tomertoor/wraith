@@ -1,6 +1,5 @@
 use crate::relay::RelayManager;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct WraithState {
     pub relay_manager: Arc<Mutex<RelayManager>>,
@@ -28,6 +27,30 @@ impl WraithState {
 
         Self {
             relay_manager: Arc::new(Mutex::new(RelayManager::new())),
+            hostname,
+            username,
+            os,
+            ip_address,
+            commands_executed: 0,
+            last_command_time: 0,
+            connected: false,
+        }
+    }
+
+    pub fn new_with_relay_manager(relay_manager: Arc<Mutex<RelayManager>>) -> Self {
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let username = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let os = std::env::consts::OS.to_string();
+        let ip_address = "0.0.0.0".to_string();
+
+        Self {
+            relay_manager,
             hostname,
             username,
             os,

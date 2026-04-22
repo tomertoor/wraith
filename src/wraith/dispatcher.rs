@@ -1,3 +1,4 @@
+use crate::commands::command::Command;
 use crate::commands::relay::RelayCommands;
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::{MessageType, WraithMessage};
@@ -5,8 +6,7 @@ use crate::wraith::state::WraithState;
 use log::info;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 type Handler = Box<dyn Fn(WraithMessage, Arc<Mutex<WraithState>>) -> Pin<Box<dyn Future<Output = WraithMessage> + Send>> + Send>;
 
@@ -37,9 +37,9 @@ impl MessageDispatcher {
 
         if msg_type == MessageType::Command {
             if let Some(crate::proto::wraith::wraith_message::Payload::Command(cmd)) = &msg.payload {
-                let relay_commands = self.relay_commands.lock().await;
+                let relay_commands = self.relay_commands.lock().unwrap();
                 let result = relay_commands.execute(cmd);
-                state.lock().await.increment_commands();
+                state.lock().unwrap().increment_commands();
 
                 return Some(MessageCodec::create_command_result(
                     result.command_id,
@@ -52,12 +52,17 @@ impl MessageDispatcher {
             }
         }
 
-        self.handlers.get(&msg_type).map(|handler| handler(msg, state).await)
+        if let Some(handler) = self.handlers.get(&msg_type) {
+            Some(handler(msg, state).await)
+        } else {
+            None
+        }
     }
 }
 
 impl Default for MessageDispatcher {
     fn default() -> Self {
+        use std::sync::Mutex;
         Self::new(RelayCommands::new(Arc::new(Mutex::new(crate::relay::RelayManager::new()))))
     }
 }

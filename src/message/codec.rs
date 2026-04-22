@@ -3,6 +3,7 @@ use crate::proto::wraith::{
     RelayList, RelayListResponse, RelayInfo, WraithMessage, MessageType,
 };
 use chrono::Utc;
+use prost::Message;
 use uuid::Uuid;
 
 pub struct MessageCodec;

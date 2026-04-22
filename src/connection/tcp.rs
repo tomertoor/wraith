@@ -115,4 +115,36 @@ impl Connection for TcpConnection {
     fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
+
+    async fn send_message(&mut self, msg: &WraithMessage) -> std::io::Result<()> {
+        let stream = self.stream.as_mut().ok_or_else(|| {
+            Error::new(ErrorKind::NotConnected, "not connected")
+        })?;
+
+        let data = msg.encode_to_vec();
+        let framed = FramedWriter::write_frame(&data).map_err(|e| Error::new(ErrorKind::Other, e))?;
+
+        stream.write_all(&framed).await?;
+        Ok(())
+    }
+
+    async fn read_message(&mut self) -> std::io::Result<WraithMessage> {
+        let stream = self.stream.as_mut().ok_or_else(|| {
+            Error::new(ErrorKind::NotConnected, "not connected")
+        })?;
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+
+        let len = u32::from_be_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) as usize;
+
+        if len > 10 * 1024 * 1024 {
+            return Err(Error::new(ErrorKind::InvalidData, "message too large"));
+        }
+
+        let mut data = vec![0u8; len];
+        stream.read_exact(&mut data).await?;
+
+        WraithMessage::decode(data.as_slice()).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+    }
 }
