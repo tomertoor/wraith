@@ -132,3 +132,9 @@ impl CommandHandler {
         })
     }
 }
+
+pub mod command;
+pub mod relay;
+
+pub use command::Command as CommandTrait;
+pub use relay::RelayCommands;
