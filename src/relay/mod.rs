@@ -38,78 +38,19 @@ impl Relay {
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
     }
-}
 
-pub struct RelayManager {
-    relays: HashMap<String, Relay>,
-}
+    pub async fn start_relay(
+        self: Arc<Self>,
+        mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        let listen_addr = format!("{}:{}", self.config.listen_host, self.config.listen_port);
+        let forward_addr = format!("{}:{}", self.config.forward_host, self.config.forward_port);
+        info!("Starting relay listener on {}", listen_addr);
+        let listener = TcpListener::bind(&listen_addr).await?;
+        debug!("Relay bound to {}, forwarding to {}", listen_addr, forward_addr);
 
-impl Default for RelayManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RelayManager {
-    pub fn new() -> Self {
-        Self { relays: HashMap::new() }
-    }
-
-    pub fn create_relay(&mut self, config: RelayConfig) -> String {
-        let relay = Relay::new(config.clone());
-        let id = relay.id.clone();
-        info!("Creating relay {}: {}:{} -> {}:{}", id, config.listen_host, config.listen_port, config.forward_host, config.forward_port);
-        self.relays.insert(id.clone(), relay);
-        id
-    }
-
-    pub fn delete_relay(&mut self, id: &str) -> bool {
-        if let Some(relay) = self.relays.remove(id) {
-            info!("Deleted relay {} ({}:{} -> {}:{})", id, relay.config.listen_host, relay.config.listen_port, relay.config.forward_host, relay.config.forward_port);
-            true
-        } else {
-            warn!("Attempted to delete non-existent relay: {}", id);
-            false
-        }
-    }
-
-    pub fn list_relays(&self) -> Vec<RelayInfo> {
-        self.relays.values().map(|r| RelayInfo {
-            relay_id: r.id.clone(),
-            listen_host: r.config.listen_host.clone(),
-            listen_port: r.config.listen_port,
-            forward_host: r.config.forward_host.clone(),
-            forward_port: r.config.forward_port,
-            active: r.is_active(),
-        }).collect()
-    }
-
-    pub fn get_relay(&self, id: &str) -> Option<&Relay> {
-        self.relays.get(id)
-    }
-}
-
-#[derive(Serialize)]
-pub struct RelayInfo {
-    pub relay_id: String,
-    pub listen_host: String,
-    pub listen_port: u16,
-    pub forward_host: String,
-    pub forward_port: u16,
-    pub active: bool,
-}
-
-pub async fn start_relay(
-    listen_addr: String,
-    forward_addr: String,
-    mut shutdown: tokio::sync::oneshot::Receiver<()>,
-) -> Result<()> {
-    info!("Starting relay listener on {}", listen_addr);
-    let listener = TcpListener::bind(&listen_addr).await?;
-    debug!("Relay bound to {}, forwarding to {}", listen_addr, forward_addr);
-
-    loop {
-        tokio::select! {
+        loop {
+            tokio::select! {
             _ = &mut shutdown => {
                 info!("Relay on {} shutting down", listen_addr);
                 break;
@@ -175,6 +116,76 @@ pub async fn start_relay(
                 }
             }
         }
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+pub struct RelayManager {
+    relays: HashMap<String, (Arc<Relay>, tokio::sync::oneshot::Sender<()>)>,
+}
+
+impl Default for RelayManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RelayManager {
+    pub fn new() -> Self {
+        Self { relays: HashMap::new() }
+    }
+
+    pub fn create_relay(&mut self, config: RelayConfig) -> String {
+        let relay = Arc::new(Relay::new(config.clone()));
+        let id = relay.id.clone();
+        info!("Creating relay {}: {}:{} -> {}:{}", id, config.listen_host, config.listen_port, config.forward_host, config.forward_port);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let relay_clone = Arc::clone(&relay);
+
+        // Store relay with its shutdown sender
+        self.relays.insert(id.clone(), (relay, shutdown_tx));
+
+        tokio::spawn(async move {
+            let _ = relay_clone.start_relay(shutdown_rx).await;
+        });
+        id
+    }
+
+    pub fn delete_relay(&mut self, id: &str) -> bool {
+        if let Some((_relay, shutdown_tx)) = self.relays.remove(id) {
+            let _ = shutdown_tx.send(());
+            info!("Deleted relay {}", id);
+            true
+        } else {
+            warn!("Attempted to delete non-existent relay: {}", id);
+            false
+        }
+    }
+
+    pub fn list_relays(&self) -> Vec<RelayInfo> {
+        self.relays.values().map(|(r, _)| RelayInfo {
+            relay_id: r.id.clone(),
+            listen_host: r.config.listen_host.clone(),
+            listen_port: r.config.listen_port,
+            forward_host: r.config.forward_host.clone(),
+            forward_port: r.config.forward_port,
+            active: r.is_active(),
+        }).collect()
+    }
+
+    pub fn get_relay(&self, id: &str) -> Option<&Relay> {
+        self.relays.get(id).map(|(r, _)| r.as_ref())
+    }
+}
+
+#[derive(Serialize)]
+pub struct RelayInfo {
+    pub relay_id: String,
+    pub listen_host: String,
+    pub listen_port: u16,
+    pub forward_host: String,
+    pub forward_port: u16,
+    pub active: bool,
 }

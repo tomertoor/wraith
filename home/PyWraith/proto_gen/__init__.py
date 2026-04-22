@@ -1,0 +1,1 @@
+# PyWraith protobuf package

@@ -29,9 +29,9 @@ impl Wraith {
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.connection.is_server() {
-            self.connection.listen()?;
+            self.connection.listen().await?;
         } else {
-            self.connection.connect()?;
+            self.connection.connect().await?;
         }
 
         self.state.lock().unwrap().set_connected(true);

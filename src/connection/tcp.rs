@@ -67,42 +67,36 @@ impl Connection for TcpConnection {
         Ok(())
     }
 
-    fn connect(&mut self) -> Result<()> {
+    async fn connect(&mut self) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
         info!("Connecting to {}", addr);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            match TokioTcpStream::connect(&addr).await {
-                Ok(stream) => {
-                    self.stream = Some(stream);
-                    info!("Connected to {}", addr);
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to connect to {}: {}", addr, e);
-                    Err(e.into())
-                }
+        match TokioTcpStream::connect(&addr).await {
+            Ok(stream) => {
+                self.stream = Some(stream);
+                info!("Connected to {}", addr);
+                Ok(())
             }
-        })
+            Err(e) => {
+                error!("Failed to connect to {}: {}", addr, e);
+                Err(e.into())
+            }
+        }
     }
 
-    fn listen(&mut self) -> Result<()> {
+    async fn listen(&mut self) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
         info!("Listening on {}", addr);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    self.stream = Some(stream);
-                    info!("Accepted connection");
-                    Ok(())
-                }
-                Err(e) => Err(e.into()),
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                self.stream = Some(stream);
+                info!("Accepted connection");
+                Ok(())
             }
-        })
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn close(&mut self) -> Result<()> {

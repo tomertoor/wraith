@@ -4,14 +4,14 @@ use std::io::Result;
 pub trait Connection: Send {
     fn init(&mut self) -> Result<()>;
 
-    fn connect(&mut self) -> Result<()> {
+    async fn connect(&mut self) -> Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "connect not implemented",
         ))
     }
 
-    fn listen(&mut self) -> Result<()> {
+    async fn listen(&mut self) -> Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "listen not implemented",
