@@ -167,7 +167,7 @@ class WraithCLI:
 
         # Parse: -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333
         parts = arg.split()
-        if len(parts) != 12:
+        if len(parts) != 10:
             print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port>")
             print("Example: create_relay -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333")
             return
