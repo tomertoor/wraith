@@ -3,7 +3,7 @@
 import socket
 import uuid
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 from PyWraith.protocol import WraithProtocol
 from PyWraith.proto_gen import wraith_pb2 as pb
@@ -81,6 +81,34 @@ class WraithClient:
             'forward_host': forward_host,
             'forward_port': str(forward_port),
         }
+        return self.send_command('create_relay', params)
+
+    def create_relay_chain(
+        self,
+        hops: List[Dict[str, Any]]
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Create a relay chain with multiple hops.
+
+        Args:
+            hops: List of dicts, each containing:
+                - listen_host: str
+                - listen_port: int
+                - forward_host: str
+                - forward_port: int
+                - protocol: str ("tcp" or "udp")
+
+        Returns:
+            Tuple[bool, Dict[str, Any]]: (success, result)
+        """
+        params = {}
+        for i, hop in enumerate(hops):
+            params[f"hop_{i}_listen_host"] = hop['listen_host']
+            params[f"hop_{i}_listen_port"] = str(hop['listen_port'])
+            params[f"hop_{i}_forward_host"] = hop['forward_host']
+            params[f"hop_{i}_forward_port"] = str(hop['forward_port'])
+            params[f"hop_{i}_protocol"] = hop['protocol']
+
         return self.send_command('create_relay', params)
 
     def delete_relay(self, relay_id: str) -> Tuple[bool, Dict[str, Any]]:
