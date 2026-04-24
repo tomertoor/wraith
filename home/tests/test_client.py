@@ -1,7 +1,7 @@
 """Tests for PyWraith client module."""
 
 import pytest
-from pywraith.client import WraithClient
+from PyWraith.client import WraithClient
 
 
 def test_client_init():

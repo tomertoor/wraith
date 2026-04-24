@@ -2,34 +2,134 @@
 """Interactive CLI for pywraith - controlling wraith tunnel tool."""
 
 import sys
-import cmd
 import argparse
+import logging
 from typing import Optional
 
+from IPython.terminal.interactiveshell import TerminalInteractiveShell
+
 from PyWraith.client import WraithClient
+from PyWraith.server import WraithServer
 
 
-class WraithCLI(cmd.Cmd):
-    """Interactive CLI for wraith."""
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    intro = """
+
+class WraithCLI:
+    """Interactive CLI for wraith with IPython backend."""
+
+    def __init__(self, mode: str = "connect", host: str = "127.0.0.1", port: int = 4444, listen_port: int = 4445):
+        self.mode = mode
+        self.host = host
+        self.port = port
+        self.listen_port = listen_port
+        self.client: Optional[WraithClient] = None
+        self.server: Optional[WraithServer] = None
+        self.connected = False
+        self._shell: Optional[TerminalInteractiveShell] = None
+
+        """Generate prompt based on current mode."""
+        if self.mode == "listen":
+            return f"wraith [listen:{self.listen_port}]> "
+        elif self.connected:
+            return f"wraith [{self.host}:{self.port}]> "
+        return "wraith> "
+
+    def _update_prompt(self):
+        """Update shell prompt if running."""
+        pass  # Prompt updates removed - IPython 8+ doesn't support prompt_manager
+
+    def run_shell(self):
+        """Run the IPython shell."""
+        self._shell = TerminalInteractiveShell.instance(
+            prompt_in1=self._get_prompt(),
+            prompt_out='',
+            banner1='''
     ╔═══════════════════════════════════════════════════════════╗
     ║              WRAITH - Tunnel Control Interface              ║
     ╚═══════════════════════════════════════════════════════════╝
 
-    Type 'help' for available commands.
-    """
-    prompt = "wraith> "
+    Type %connect, %listen, %create_relay, etc. for commands.
+    Use %help for full command list.
+    ''',
+        )
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 4444):
-        cmd.Cmd.__init__(self)
-        self.host = host
-        self.port = port
-        self.client: Optional[WraithClient] = None
-        self.connected = False
+        # Expose CLI and client/server in user namespace
+        self._shell.user_ns.update({
+            'cli': self,
+            'client': self.client,
+            'server': self.server,
+        })
 
-    def do_connect(self, arg):
-        """connect [host] [port] - Connect to wraith server."""
+        # Register magic commands after shell is created
+        magic_methods = {
+            'connect': self.do_connect,
+            'disconnect': self.do_disconnect,
+            'create_relay': self.do_create_relay,
+            'delete_relay': self.do_delete_relay,
+            'list_relays': self.do_list_relays,
+            'listen': self.do_listen,
+            'stop_listening': self.do_stop_listening,
+            'agents': self.do_agents,
+            'status': self.do_status,
+            'help': self.do_help,
+            'exit': self.do_exit,
+        }
+
+        for name, method in magic_methods.items():
+            self._shell.register_magic_function(method, 'line', name)
+
+        self._shell.mainloop()
+
+    # ---- Command handlers ----
+
+    def do_listen(self, arg: str = ""):
+        """%listen [port] - Start listening for wraith agents."""
+        if self.mode == "listen":
+            print("Already in listen mode")
+            return
+
+        args = arg.split()
+        port = int(args[0]) if len(args) > 0 else self.listen_port
+
+        self.server = WraithServer(port=port)
+        if self.server.start():
+            self.mode = "listen"
+            self.listen_port = port
+            self._update_prompt()
+            print(f"Listening on port {port} for wraith agents")
+        else:
+            print(f"Failed to start listening on port {port}")
+
+    def do_stop_listening(self, arg: str = ""):
+        """%stop_listening - Stop listening for agents."""
+        if self.mode != "listen" or not self.server:
+            print("Not in listen mode")
+            return
+
+        self.server.stop()
+        self.server = None
+        self.mode = "connect"
+        self._update_prompt()
+        print("Stopped listening")
+
+    def do_agents(self, arg: str = ""):
+        """%agents - List connected agents (listen mode only)."""
+        if self.mode != "listen" or not self.server:
+            print("Not in listen mode")
+            return
+
+        agents = self.server.list_agents()
+        if not agents:
+            print("No agents connected")
+            return
+
+        print("Connected agents:")
+        for agent in agents:
+            print(f"  {agent['agent_id'][:8]}... - {agent['username']}@{agent['hostname']} ({agent['ip_address']})")
+
+    def do_connect(self, arg: str = ""):
+        """%connect [host] [port] - Connect to wraith server."""
         args = arg.split()
         host = args[0] if len(args) > 0 else self.host
         port = int(args[1]) if len(args) > 1 else self.port
@@ -39,21 +139,27 @@ class WraithCLI(cmd.Cmd):
             self.connected = True
             self.host = host
             self.port = port
-            self.prompt = f"wraith [{host}:{port}]> "
+            self._update_prompt()
             print(f"Connected to {host}:{port}")
         else:
             print("Failed to connect")
 
-    def do_disconnect(self, arg):
-        """Disconnect from wraith server."""
-        if self.client:
+    def do_disconnect(self, arg: str = ""):
+        """%disconnect - Disconnect from wraith server or stop listening."""
+        if self.mode == "listen" and self.server:
+            self.server.stop()
+            self.server = None
+            self.mode = "connect"
+            self._update_prompt()
+            print("Stopped listening")
+        elif self.client:
             self.client.disconnect()
             self.connected = False
-            self.prompt = "wraith> "
+            self._update_prompt()
             print("Disconnected")
 
-    def do_create_relay(self, arg):
-        """create_relay <listen_host> <listen_port> <forward_host> <forward_port>"""
+    def do_create_relay(self, arg: str = ""):
+        """%create_relay <listen_host> <listen_port> <forward_host> <forward_port>"""
         if not self.connected:
             print("Not connected. Use 'connect' first.")
             return
@@ -73,8 +179,8 @@ class WraithCLI(cmd.Cmd):
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
 
-    def do_delete_relay(self, arg):
-        """delete_relay <relay_id> - Delete a relay by ID."""
+    def do_delete_relay(self, arg: str = ""):
+        """%delete_relay <relay_id> - Delete a relay by ID."""
         if not self.connected:
             print("Not connected. Use 'connect' first.")
             return
@@ -89,8 +195,8 @@ class WraithCLI(cmd.Cmd):
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
 
-    def do_list_relays(self, arg):
-        """list_relays - List all active relays."""
+    def do_list_relays(self, arg: str = ""):
+        """%list_relays - List all active relays."""
         if not self.connected:
             print("Not connected. Use 'connect' first.")
             return
@@ -102,20 +208,62 @@ class WraithCLI(cmd.Cmd):
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
 
-    def do_exit(self, arg):
-        """Exit the CLI."""
+    def do_status(self, arg: str = ""):
+        """%status - Show current connection status."""
+        if self.mode == "listen":
+            print(f"Mode: listen (port {self.listen_port})")
+            print(f"Server: {'running' if self.server else 'stopped'}")
+        else:
+            print(f"Mode: connect")
+            print(f"Connected: {self.connected}")
+            if self.connected:
+                print(f"Host: {self.host}:{self.port}")
+
+    def do_help(self, arg: str = ""):
+        """%help [command] - Show help for commands."""
+        commands = {
+            'connect': self.do_connect,
+            'disconnect': self.do_disconnect,
+            'create_relay': self.do_create_relay,
+            'delete_relay': self.do_delete_relay,
+            'list_relays': self.do_list_relays,
+            'listen': self.do_listen,
+            'stop_listening': self.do_stop_listening,
+            'agents': self.do_agents,
+            'status': self.do_status,
+            'exit': self.do_exit,
+            'help': self.do_help,
+        }
+
+        if arg:
+            cmd = commands.get(arg)
+            if cmd:
+                print(cmd.__doc__)
+            else:
+                print(f"Unknown command: {arg}")
+            return
+
+        print("Available commands:")
+        print("-" * 50)
+        for name, method in commands.items():
+            if method.__doc__:
+                doc = method.__doc__.split('\n')[0].strip()
+                print(f"  {name:<20} {doc}")
+        print("-" * 50)
+        print("Tip: Use plain Python expressions for interactive access:")
+        print("  client.create_relay('0.0.0.0', 8080, '10.0.0.1', 443)")
+        print("  cli.do_connect('127.0.0.1', 4444)")
+
+    def do_exit(self, arg: str = ""):
+        """%exit - Exit the CLI."""
         if self.client:
             self.client.disconnect()
         print("Goodbye!")
         sys.exit(0)
 
-    def do_quit(self, arg):
-        """Exit the CLI."""
-        return self.do_exit(arg)
-
-    def do_EOF(self, arg):
-        """Handle Ctrl-D."""
-        print()
+    # Aliases
+    def do_quit(self, arg: str = ""):
+        """%quit - Exit the CLI."""
         self.do_exit(arg)
 
 
@@ -124,10 +272,21 @@ def main():
     parser = argparse.ArgumentParser(description="Wraith Tunnel Control CLI")
     parser.add_argument("--host", default="127.0.0.1", help="Wraith server host")
     parser.add_argument("--port", type=int, default=4444, help="Wraith server port")
+    parser.add_argument("--listen", action="store_true", help="Listen mode (receive connections from wraith)")
+    parser.add_argument("--listen-port", type=int, default=4445, help="Port to listen on for wraith agents")
     args = parser.parse_args()
 
-    cli = WraithCLI(args.host, args.port)
-    cli.cmdloop()
+    cli = WraithCLI(
+        mode="listen" if args.listen else "connect",
+        host=args.host,
+        port=args.port,
+        listen_port=args.listen_port
+    )
+
+    if args.listen:
+        cli.do_listen(str(args.listen_port))
+
+    cli.run_shell()
 
 
 if __name__ == "__main__":

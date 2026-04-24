@@ -1,7 +1,7 @@
 """Tests for PyWraith protocol module."""
 
 import pytest
-from pywraith.protocol import WraithProtocol
+from PyWraith.protocol import WraithProtocol
 
 
 def test_create_command():

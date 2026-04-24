@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "protobuf>=4.25.0",
     "prompt-toolkit>=3.0.0",
+    "ipython>=8.0.0",
 ]
 
 [project.optional-dependencies]
