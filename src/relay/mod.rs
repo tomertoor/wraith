@@ -6,9 +6,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+pub mod chain;
 pub mod tcp;
 pub mod udp;
 
+pub use chain::RelayChain;
 pub use tcp::TcpRelay;
 pub use udp::UdpRelay;
 
@@ -121,6 +123,24 @@ impl RelayManager {
             config.forward_host,
             config.forward_port
         );
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let relay_clone = Arc::clone(&relay);
+
+        self.relays.insert(id.clone(), (relay, shutdown_tx));
+
+        tokio::spawn(async move {
+            let _ = relay_clone.start_relay(shutdown_rx).await;
+        });
+        id
+    }
+
+    pub fn create_relay_chain(&mut self, hops: Vec<RelayConfig>) -> String {
+        let relay = RelayChain::new(hops);
+        let hop_count = relay.config().len();
+        let relay: Arc<dyn RelayTrait> = Arc::new(relay);
+        let id = relay.id().to_string();
+        info!("Creating relay chain {} with {} hops", id, hop_count);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let relay_clone = Arc::clone(&relay);
