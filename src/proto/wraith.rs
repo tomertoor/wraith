@@ -98,6 +98,9 @@ pub struct RelayCreate {
     pub forward_host: ::prost::alloc::string::String,
     #[prost(int32, tag = "5")]
     pub forward_port: i32,
+    /// "tcp" or "udp", defaults to "tcp"
+    #[prost(string, tag = "6")]
+    pub protocol: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -129,6 +132,32 @@ pub struct RelayInfo {
     pub forward_port: i32,
     #[prost(bool, tag = "6")]
     pub active: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ProtocolType {
+    Tcp = 0,
+    Udp = 1,
+}
+impl ProtocolType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            ProtocolType::Tcp => "TCP",
+            ProtocolType::Udp => "UDP",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TCP" => Some(Self::Tcp),
+            "UDP" => Some(Self::Udp),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

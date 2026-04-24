@@ -1,4 +1,4 @@
-use crate::proto::wraith::{Command, CommandResult};
+use crate::proto::wraith::{Command, CommandResult, ProtocolType};
 use crate::relay::RelayManager;
 use anyhow::Result;
 use log::{debug, info, warn};
@@ -39,6 +39,7 @@ impl CommandHandler {
         let listen_port: i32 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
         let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
         let forward_port: i32 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let protocol: i32 = cmd.params.get("protocol").and_then(|s| s.parse().ok()).unwrap_or(ProtocolType::Tcp as i32);
 
         debug!("create_relay: listen={}:{}, forward={}:{}", listen_host, listen_port, forward_host, forward_port);
 
@@ -47,6 +48,7 @@ impl CommandHandler {
             listen_port: listen_port as u16,
             forward_host,
             forward_port: forward_port as u16,
+            protocol: crate::relay::Transport::Tcp,
         };
 
         let relay_id = {

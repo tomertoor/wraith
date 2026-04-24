@@ -1,6 +1,6 @@
 use crate::commands::command::Command;
 use crate::proto::wraith::{Command as ProtoCommand, CommandResult};
-use crate::relay::{RelayConfig, RelayManager};
+use crate::relay::{RelayConfig, RelayManager, Transport};
 use log::{debug, info};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -19,15 +19,18 @@ impl RelayCommands {
         let listen_port: i32 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
         let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
         let forward_port: i32 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let protocol_str = cmd.params.get("protocol").cloned().unwrap_or_else(|| "tcp".to_string());
+        let protocol = Transport::from_str(&protocol_str);
 
-        debug!("create_relay: listen={}:{}, forward={}:{}", listen_host, listen_port, forward_host, forward_port);
+        debug!("create_relay: listen={}:{}, forward={}:{}, protocol={}", listen_host, listen_port, forward_host, forward_port, protocol);
 
-        let config = RelayConfig {
-            listen_host: listen_host.clone(),
-            listen_port: listen_port as u16,
-            forward_host: forward_host.clone(),
-            forward_port: forward_port as u16,
-        };
+        let config = RelayConfig::new(
+            listen_host.clone(),
+            listen_port as u16,
+            forward_host.clone(),
+            forward_port as u16,
+            protocol,
+        );
 
         let relay_id = {
             let mut manager = self.relay_manager.lock().unwrap();

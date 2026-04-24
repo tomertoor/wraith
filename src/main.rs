@@ -87,10 +87,12 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    match rt.block_on(wraith.run()) {
-        Ok(_) => info!("Connection closed gracefully"),
-        Err(e) => {
-            error!("Error: {}", e);
+    loop {
+        match rt.block_on(wraith.run()) {
+            Ok(_) => info!("Connection closed gracefully"),
+            Err(e) => {
+                error!("Error: {}", e);
+            }
         }
     }
 }

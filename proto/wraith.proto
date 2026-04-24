@@ -2,6 +2,11 @@ syntax = "proto3";
 
 package wraith;
 
+enum ProtocolType {
+    TCP = 0;
+    UDP = 1;
+}
+
 enum MessageType {
     REGISTRATION = 0;
     HEARTBEAT = 1;
@@ -63,6 +68,7 @@ message RelayCreate {
     int32 listen_port = 3;
     string forward_host = 4;
     int32 forward_port = 5;
+    string protocol = 6;  // "tcp" or "udp", defaults to "tcp"
 }
 
 message RelayDelete {
