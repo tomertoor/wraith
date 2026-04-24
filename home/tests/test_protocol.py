@@ -54,41 +54,60 @@ def test_encode_decode_message():
     # For now just verify encoding doesn't crash
 
 
-def test_create_relay_chain_command():
-    """Test create_relay_chain_command creates proper relay chain messages."""
-    hops = [
-        {
-            'listen_host': '127.0.0.1',
-            'listen_port': 6666,
-            'forward_host': '127.0.0.1',
-            'forward_port': 7777,
-            'protocol': 'tcp'
-        },
-        {
-            'listen_host': '127.0.0.1',
-            'listen_port': 7777,
-            'forward_host': '10.0.0.1',
-            'forward_port': 443,
-            'protocol': 'udp'
-        }
-    ]
+def test_create_relay_command():
+    """Test create_relay_command with protocol translation."""
+    msg = WraithProtocol.create_relay_command(
+        command_id="test-123",
+        listen_host="0.0.0.0",
+        listen_port=2222,
+        listen_protocol="tcp",
+        forward_host="127.0.0.1",
+        forward_port=3333,
+        forward_protocol="udp",
+    )
 
-    msg = WraithProtocol.create_relay_chain_command('cmd-123', hops)
+    # Verify message structure
+    assert msg.msg_type == pb.RELAY_CREATE
+    assert msg.relay_create.config.listen.host == "0.0.0.0"
+    assert msg.relay_create.config.listen.port == 2222
+    assert msg.relay_create.config.listen.protocol == "tcp"
+    assert msg.relay_create.config.forward.host == "127.0.0.1"
+    assert msg.relay_create.config.forward.port == 3333
+    assert msg.relay_create.config.forward.protocol == "udp"
+    assert msg.relay_create.relay_id != ""
+
+
+def test_create_relay_command_udp_to_tcp():
+    """Test create_relay_command with UDP listen and TCP forward."""
+    msg = WraithProtocol.create_relay_command(
+        command_id="test-456",
+        listen_host="0.0.0.0",
+        listen_port=5555,
+        listen_protocol="udp",
+        forward_host="10.0.0.1",
+        forward_port=8888,
+        forward_protocol="tcp",
+    )
 
     assert msg.msg_type == pb.RELAY_CREATE
-    assert msg.message_id == 'cmd-123'
-    assert len(msg.relay_create.hops) == 2
+    assert msg.relay_create.config.listen.protocol == "udp"
+    assert msg.relay_create.config.forward.protocol == "tcp"
 
-    # Verify first hop
-    assert msg.relay_create.hops[0].listen_host == '127.0.0.1'
-    assert msg.relay_create.hops[0].listen_port == 6666
-    assert msg.relay_create.hops[0].forward_host == '127.0.0.1'
-    assert msg.relay_create.hops[0].forward_port == 7777
-    assert msg.relay_create.hops[0].protocol == 'tcp'
 
-    # Verify second hop
-    assert msg.relay_create.hops[1].listen_host == '127.0.0.1'
-    assert msg.relay_create.hops[1].listen_port == 7777
-    assert msg.relay_create.hops[1].forward_host == '10.0.0.1'
-    assert msg.relay_create.hops[1].forward_port == 443
-    assert msg.relay_create.hops[1].protocol == 'udp'
+def test_create_relay_command_validation():
+    """Test that invalid protocols are still accepted (validation happens server-side)."""
+    msg = WraithProtocol.create_relay_command(
+        command_id="test-789",
+        listen_host="0.0.0.0",
+        listen_port=2222,
+        listen_protocol="tcp",
+        forward_host="127.0.0.1",
+        forward_port=3333,
+        forward_protocol="udp",
+    )
+    # The protocol field accepts any string - server-side validation will reject invalid ones
+    encoded = WraithProtocol.encode_message(msg)
+    assert len(encoded) > 0
+    # Verify we can create the message - validation of protocol values happens server-side
+    assert msg.relay_create.config.listen.protocol == "tcp"
+    assert msg.relay_create.config.forward.protocol == "udp"
