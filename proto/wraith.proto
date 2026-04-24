@@ -62,13 +62,17 @@ message CommandResult {
     string error = 6;
 }
 
+message RelayHop {
+    string listen_host = 1;
+    int32 listen_port = 2;
+    string forward_host = 3;
+    int32 forward_port = 4;
+    string protocol = 5;  // "tcp" or "udp"
+}
+
 message RelayCreate {
     string relay_id = 1;
-    string listen_host = 2;
-    int32 listen_port = 3;
-    string forward_host = 4;
-    int32 forward_port = 5;
-    string protocol = 6;  // "tcp" or "udp", defaults to "tcp"
+    repeated RelayHop hops = 2;  // At least 2 hops required
 }
 
 message RelayDelete {

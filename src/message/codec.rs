@@ -1,6 +1,6 @@
 use crate::proto::wraith::{
     Command, CommandResult, Heartbeat, Registration, RelayCreate, RelayDelete,
-    RelayList, RelayListResponse, RelayInfo, WraithMessage, MessageType,
+    RelayList, RelayListResponse, RelayInfo, RelayHop, WraithMessage, MessageType,
 };
 use chrono::Utc;
 use prost::Message;
@@ -84,17 +84,11 @@ impl MessageCodec {
 
     pub fn create_relay_create(
         relay_id: String,
-        listen_host: String,
-        listen_port: i32,
-        forward_host: String,
-        forward_port: i32,
+        hops: Vec<RelayHop>,
     ) -> WraithMessage {
         let mut rc = RelayCreate::default();
         rc.relay_id = relay_id;
-        rc.listen_host = listen_host;
-        rc.listen_port = listen_port;
-        rc.forward_host = forward_host;
-        rc.forward_port = forward_port;
+        rc.hops = hops;
 
         let mut msg = WraithMessage::default();
         msg.msg_type = MessageType::RelayCreate as i32;

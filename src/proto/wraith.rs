@@ -87,20 +87,27 @@ pub struct CommandResult {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RelayHop {
+    #[prost(string, tag = "1")]
+    pub listen_host: ::prost::alloc::string::String,
+    #[prost(int32, tag = "2")]
+    pub listen_port: i32,
+    #[prost(string, tag = "3")]
+    pub forward_host: ::prost::alloc::string::String,
+    #[prost(int32, tag = "4")]
+    pub forward_port: i32,
+    /// "tcp" or "udp"
+    #[prost(string, tag = "5")]
+    pub protocol: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RelayCreate {
     #[prost(string, tag = "1")]
     pub relay_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub listen_host: ::prost::alloc::string::String,
-    #[prost(int32, tag = "3")]
-    pub listen_port: i32,
-    #[prost(string, tag = "4")]
-    pub forward_host: ::prost::alloc::string::String,
-    #[prost(int32, tag = "5")]
-    pub forward_port: i32,
-    /// "tcp" or "udp", defaults to "tcp"
-    #[prost(string, tag = "6")]
-    pub protocol: ::prost::alloc::string::String,
+    /// At least 2 hops required
+    #[prost(message, repeated, tag = "2")]
+    pub hops: ::prost::alloc::vec::Vec<RelayHop>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
