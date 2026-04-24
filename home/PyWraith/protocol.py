@@ -3,7 +3,7 @@
 import struct
 import time
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from PyWraith.proto_gen import wraith_pb2 as pb
 
@@ -112,6 +112,47 @@ class WraithProtocol:
             timestamp=int(time.time() * 1000),
             registration=registration
         )
+        return msg
+
+    @staticmethod
+    def create_relay_chain_command(
+        command_id: str,
+        hops: List[Dict],
+        timeout: int = 30
+    ) -> pb.WraithMessage:
+        """Create a relay chain command with multiple hops.
+
+        Args:
+            command_id: Unique command identifier
+            hops: List of dicts, each containing:
+                - listen_host: str
+                - listen_port: int
+                - forward_host: str
+                - forward_port: int
+                - protocol: str ("tcp" or "udp")
+            timeout: Command timeout in seconds
+
+        Returns:
+            pb.WraithMessage with RELAY_CREATE payload containing hops
+        """
+        msg = pb.WraithMessage()
+        msg.msg_type = pb.RELAY_CREATE
+        msg.message_id = command_id
+        msg.timestamp = int(time.time() * 1000)
+
+        relay_create = pb.RelayCreate()
+        relay_create.relay_id = str(uuid.uuid4())
+
+        for hop in hops:
+            h = pb.RelayHop()
+            h.listen_host = hop['listen_host']
+            h.listen_port = hop['listen_port']
+            h.forward_host = hop['forward_host']
+            h.forward_port = hop['forward_port']
+            h.protocol = hop['protocol']
+            relay_create.hops.append(h)
+
+        msg.relay_create.CopyFrom(relay_create)
         return msg
 
     @staticmethod
