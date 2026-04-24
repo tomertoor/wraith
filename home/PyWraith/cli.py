@@ -168,6 +168,9 @@ class WraithCLI:
         # Example: -t 127.0.0.1 6666 -u 127.0.0.1 7777 -t 127.0.0.1 8888
         # Final forward destination can be added after all hops: ... <host> <port>
         parts = arg.split()
+        if not parts:
+            print("Usage: create_relay [-t <host> <port>] [-u <host> <port>] ... [final_host] [final_port]")
+            return
         hops = []
         i = 0
 
@@ -200,9 +203,18 @@ class WraithCLI:
             listen_port = parts[i + 1]
             i += 2
 
+            try:
+                listen_port = int(listen_port)
+            except ValueError:
+                print(f"Invalid port '{listen_port}' - must be an integer")
+                return
+            if not (0 <= listen_port <= 65535):
+                print(f"Port {listen_port} out of range (0-65535)")
+                return
+
             hops.append({
                 'listen_host': listen_host,
-                'listen_port': int(listen_port),
+                'listen_port': listen_port,
                 'protocol': protocol,
                 'forward_host': '',  # Filled in below
                 'forward_port': 0,
@@ -220,8 +232,17 @@ class WraithCLI:
 
         # Check for final forward destination (trailing <host> <port> without flag)
         if i < len(parts):
+            final_port = parts[i + 1]
+            try:
+                final_port = int(final_port)
+            except ValueError:
+                print(f"Invalid port '{final_port}' - must be an integer")
+                return
+            if not (0 <= final_port <= 65535):
+                print(f"Port {final_port} out of range (0-65535)")
+                return
             hops[-1]['forward_host'] = parts[i]
-            hops[-1]['forward_port'] = int(parts[i + 1])
+            hops[-1]['forward_port'] = final_port
         else:
             hops[-1]['forward_host'] = hops[-1]['listen_host']
             hops[-1]['forward_port'] = 0
