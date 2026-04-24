@@ -15,26 +15,78 @@ impl RelayCommands {
     }
 
     pub fn handle_create_relay(&self, cmd: &ProtoCommand) -> CommandResult {
-        let listen_host = cmd.params.get("listen_host").cloned().unwrap_or_default();
-        let listen_port: i32 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
-        let forward_port: i32 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let protocol_str = cmd.params.get("protocol").cloned().unwrap_or_else(|| "tcp".to_string());
-        let protocol = Transport::from_str(&protocol_str);
+        // Hops come as: hop_0_listen_host, hop_0_listen_port, hop_0_forward_host, hop_0_forward_port, hop_0_protocol, hop_1_...
+        // Or legacy single-hop: listen_host, listen_port, forward_host, forward_port, protocol
+        let mut hops: Vec<RelayConfig> = Vec::new();
 
-        debug!("create_relay: listen={}:{}, forward={}:{}, protocol={}", listen_host, listen_port, forward_host, forward_port, protocol);
+        // Check if we have hop-based params (new format) or legacy format
+        if let Some(first_listen_host) = cmd.params.get("hop_0_listen_host") {
+            // New hop-based format
+            let mut i = 0;
+            while let Some(listen_host) = cmd.params.get(&format!("hop_{}_listen_host", i)) {
+                let listen_port: u16 = cmd.params
+                    .get(&format!("hop_{}_listen_port", i))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let forward_host = cmd.params
+                    .get(&format!("hop_{}_forward_host", i))
+                    .cloned()
+                    .unwrap_or_default();
+                let forward_port: u16 = cmd.params
+                    .get(&format!("hop_{}_forward_port", i))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let protocol_str = cmd.params
+                    .get(&format!("hop_{}_protocol", i))
+                    .cloned()
+                    .unwrap_or_else(|| "tcp".to_string());
 
-        let config = RelayConfig::new(
-            listen_host.clone(),
-            listen_port as u16,
-            forward_host.clone(),
-            forward_port as u16,
-            protocol,
-        );
+                hops.push(RelayConfig::new(
+                    listen_host.clone(),
+                    listen_port,
+                    forward_host,
+                    forward_port,
+                    Transport::from_str(&protocol_str),
+                ));
+                i += 1;
+            }
+        } else {
+            // Legacy single-hop format (backward compatible)
+            let listen_host = cmd.params.get("listen_host").cloned().unwrap_or_default();
+            let listen_port: u16 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
+            let forward_port: u16 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let protocol_str = cmd.params.get("protocol").cloned().unwrap_or_else(|| "tcp".to_string());
+
+            hops.push(RelayConfig::new(
+                listen_host,
+                listen_port as u16,
+                forward_host,
+                forward_port as u16,
+                Transport::from_str(&protocol_str),
+            ));
+        }
+
+        if hops.len() < 1 || (hops.len() == 1 && hops[0].listen_port == 0) {
+            return CommandResult {
+                command_id: cmd.command_id.clone(),
+                status: "error".to_string(),
+                output: String::new(),
+                exit_code: -1,
+                duration_ms: 0,
+                error: "Invalid relay configuration: no hops provided".to_string(),
+            };
+        }
+
+        debug!("create_relay: {} hop(s)", hops.len());
 
         let relay_id = {
             let mut manager = self.relay_manager.lock().unwrap();
-            manager.create_relay(config)
+            if hops.len() == 1 {
+                manager.create_relay(hops.remove(0))
+            } else {
+                manager.create_relay_chain(hops)
+            }
         };
 
         info!("Created relay with id: {}", relay_id);
