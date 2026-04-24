@@ -28,16 +28,17 @@ class WraithCLI:
         self.connected = False
         self._shell: Optional[TerminalInteractiveShell] = None
 
+    def _update_prompt(self):
+        """Update shell prompt if running."""
+        pass  # Prompt updates removed - IPython 8+ doesn't support prompt_manager
+
+    def _get_prompt(self) -> str:
         """Generate prompt based on current mode."""
         if self.mode == "listen":
             return f"wraith [listen:{self.listen_port}]> "
         elif self.connected:
             return f"wraith [{self.host}:{self.port}]> "
         return "wraith> "
-
-    def _update_prompt(self):
-        """Update shell prompt if running."""
-        pass  # Prompt updates removed - IPython 8+ doesn't support prompt_manager
 
     def run_shell(self):
         """Run the IPython shell."""
@@ -159,98 +160,54 @@ class WraithCLI:
             print("Disconnected")
 
     def do_create_relay(self, arg: str = ""):
-        """%create_relay [-t <host> <port>] [-u <host> <port>] ... - Create relay with flexible protocol chain"""
+        """%create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port> - Create protocol-relaying relay"""
         if not self.connected:
             print("Not connected. Use 'connect' first.")
             return
 
-        # Parse -t (TCP) and -u (UDP) flags
-        # Example: -t 127.0.0.1 6666 -u 127.0.0.1 7777 -t 127.0.0.1 8888
-        # Final forward destination can be added after all hops: ... <host> <port>
+        # Parse: -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333
         parts = arg.split()
-        if not parts:
-            print("Usage: create_relay [-t <host> <port>] [-u <host> <port>] ... [final_host] [final_port]")
-            return
-        hops = []
-        i = 0
-
-        # First pass: parse all -t/-u hops
-        while i < len(parts):
-            if parts[i] == '-t':
-                protocol = 'tcp'
-                i += 1
-            elif parts[i] == '-u':
-                protocol = 'udp'
-                i += 1
-            else:
-                # Could be final forward destination if it looks like host:port
-                if parts[i][0] == '-':
-                    # It's another flag, not a final destination
-                    print(f"Expected -t or -u at position {i}, got: {parts[i]}")
-                    print("Usage: create_relay [-t <host> <port>] [-u <host> <port>] ...")
-                    return
-                if i + 1 >= len(parts):
-                    print(f"Missing port for final forward destination at position {i}")
-                    return
-                # This is the final forward destination
-                break
-
-            if i + 1 >= len(parts):
-                print(f"Missing port for {protocol} at position {i}")
-                return
-
-            listen_host = parts[i]
-            listen_port = parts[i + 1]
-            i += 2
-
-            try:
-                listen_port = int(listen_port)
-            except ValueError:
-                print(f"Invalid port '{listen_port}' - must be an integer")
-                return
-            if not (0 <= listen_port <= 65535):
-                print(f"Port {listen_port} out of range (0-65535)")
-                return
-
-            hops.append({
-                'listen_host': listen_host,
-                'listen_port': listen_port,
-                'protocol': protocol,
-                'forward_host': '',  # Filled in below
-                'forward_port': 0,
-            })
-
-        if len(hops) < 2:
-            print("Need at least 2 hops (e.g., -t 0.0.0.0 8080 -t 10.0.0.1 443)")
-            print("Usage: create_relay [-t <host> <port>] [-u <host> <port>] ...")
+        if len(parts) != 12:
+            print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port>")
+            print("Example: create_relay -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333")
             return
 
-        # Fill in forward addresses: hop[i] forwards to hop[i+1]'s listen
-        for j in range(len(hops) - 1):
-            hops[j]['forward_host'] = hops[j + 1]['listen_host']
-            hops[j]['forward_port'] = hops[j + 1]['listen_port']
+        # Parse flags
+        try:
+            listen_protocol = parts[1]  # after -l
+            listen_host = parts[3]
+            listen_port = int(parts[4])
+            forward_protocol = parts[6]  # after -f
+            forward_host = parts[8]
+            forward_port = int(parts[9])
+        except (IndexError, ValueError) as e:
+            print(f"Parse error: {e}")
+            print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port>")
+            return
 
-        # Check for final forward destination (trailing <host> <port> without flag)
-        if i < len(parts):
-            final_port = parts[i + 1]
-            try:
-                final_port = int(final_port)
-            except ValueError:
-                print(f"Invalid port '{final_port}' - must be an integer")
-                return
-            if not (0 <= final_port <= 65535):
-                print(f"Port {final_port} out of range (0-65535)")
-                return
-            hops[-1]['forward_host'] = parts[i]
-            hops[-1]['forward_port'] = final_port
-        else:
-            hops[-1]['forward_host'] = hops[-1]['listen_host']
-            hops[-1]['forward_port'] = 0
+        # Validate protocols
+        if listen_protocol not in ('tcp', 'udp'):
+            print(f"Invalid listen protocol: {listen_protocol} (must be tcp or udp)")
+            return
+        if forward_protocol not in ('tcp', 'udp'):
+            print(f"Invalid forward protocol: {forward_protocol} (must be tcp or udp)")
+            return
 
-        success, result = self.client.create_relay_chain(hops)
+        # Validate ports
+        if not (0 <= listen_port <= 65535):
+            print(f"Listen port {listen_port} out of range (0-65535)")
+            return
+        if not (0 <= forward_port <= 65535):
+            print(f"Forward port {forward_port} out of range (0-65535)")
+            return
+
+        success, result = self.client.create_relay(
+            listen_host, listen_port, listen_protocol,
+            forward_host, forward_port, forward_protocol
+        )
 
         if success:
-            print(f"Relay chain created: {result.get('output', 'unknown')}")
+            print(f"Relay created: {result.get('output', 'unknown')}")
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
 
@@ -326,7 +283,7 @@ class WraithCLI:
                 print(f"  {name:<20} {doc}")
         print("-" * 50)
         print("Tip: Use plain Python expressions for interactive access:")
-        print("  client.create_relay('0.0.0.0', 8080, '10.0.0.1', 443)")
+        print("  client.create_relay('0.0.0.0', 2222, 'tcp', '127.0.0.1', 3333, 'udp')")
         print("  cli.do_connect('127.0.0.1', 4444)")
 
     def do_exit(self, arg: str = ""):
