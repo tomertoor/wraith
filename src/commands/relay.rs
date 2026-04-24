@@ -1,6 +1,6 @@
 use crate::commands::command::Command;
 use crate::proto::wraith::{Command as ProtoCommand, CommandResult};
-use crate::relay::{RelayConfig, RelayManager, Transport};
+use crate::relay::{RelayConfig, RelayEndpoint, RelayManager, Transport};
 use log::{debug, info};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -42,11 +42,8 @@ impl RelayCommands {
                     .unwrap_or_else(|| "tcp".to_string());
 
                 hops.push(RelayConfig::new(
-                    listen_host.clone(),
-                    listen_port,
-                    forward_host,
-                    forward_port,
-                    Transport::from_str(&protocol_str),
+                    RelayEndpoint::from_str(listen_host, listen_port, &protocol_str),
+                    RelayEndpoint::from_str(&forward_host, forward_port, &protocol_str),
                 ));
                 i += 1;
             }
@@ -59,15 +56,12 @@ impl RelayCommands {
             let protocol_str = cmd.params.get("protocol").cloned().unwrap_or_else(|| "tcp".to_string());
 
             hops.push(RelayConfig::new(
-                listen_host,
-                listen_port as u16,
-                forward_host,
-                forward_port as u16,
-                Transport::from_str(&protocol_str),
+                RelayEndpoint::from_str(&listen_host, listen_port, &protocol_str),
+                RelayEndpoint::from_str(&forward_host, forward_port, &protocol_str),
             ));
         }
 
-        if hops.len() < 1 || (hops.len() == 1 && hops[0].listen_port == 0) {
+        if hops.len() < 1 || (hops.len() == 1 && hops[0].listen.port == 0) {
             return CommandResult {
                 command_id: cmd.command_id.clone(),
                 status: "error".to_string(),
@@ -82,11 +76,7 @@ impl RelayCommands {
 
         let relay_id = {
             let mut manager = self.relay_manager.lock().unwrap();
-            if hops.len() == 1 {
-                manager.create_relay(hops.remove(0))
-            } else {
-                manager.create_relay_chain(hops)
-            }
+            manager.create_relay(hops.remove(0))
         };
 
         info!("Created relay with id: {}", relay_id);

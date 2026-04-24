@@ -1,5 +1,5 @@
-use crate::proto::wraith::{Command, CommandResult, ProtocolType};
-use crate::relay::RelayManager;
+use crate::proto::wraith::{Command, CommandResult};
+use crate::relay::{RelayConfig, RelayEndpoint, RelayManager, Transport};
 use anyhow::Result;
 use log::{debug, info, warn};
 use std::sync::Arc;
@@ -36,20 +36,18 @@ impl CommandHandler {
 
     async fn handle_create_relay(&self, cmd: Command) -> Result<CommandResult> {
         let listen_host = cmd.params.get("listen_host").cloned().unwrap_or_default();
-        let listen_port: i32 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let listen_port: u16 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let listen_protocol = cmd.params.get("listen_protocol").cloned().unwrap_or_else(|| "tcp".to_string());
         let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
-        let forward_port: i32 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let protocol: i32 = cmd.params.get("protocol").and_then(|s| s.parse().ok()).unwrap_or(ProtocolType::Tcp as i32);
+        let forward_port: u16 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let forward_protocol = cmd.params.get("forward_protocol").cloned().unwrap_or_else(|| "tcp".to_string());
 
-        debug!("create_relay: listen={}:{}, forward={}:{}", listen_host, listen_port, forward_host, forward_port);
+        debug!("create_relay: listen={}:{} ({}), forward={}:{} ({})", listen_host, listen_port, listen_protocol, forward_host, forward_port, forward_protocol);
 
-        let config = crate::relay::RelayConfig {
-            listen_host,
-            listen_port: listen_port as u16,
-            forward_host,
-            forward_port: forward_port as u16,
-            protocol: crate::relay::Transport::Tcp,
-        };
+        let config = RelayConfig::new(
+            RelayEndpoint::from_str(&listen_host, listen_port, &listen_protocol),
+            RelayEndpoint::from_str(&forward_host, forward_port, &forward_protocol),
+        );
 
         let relay_id = {
             let mut manager = self.relay_manager.lock().await;
