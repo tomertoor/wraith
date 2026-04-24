@@ -1,7 +1,7 @@
 use crate::relay::{RelayConfig, RelayTrait, Transport};
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -157,9 +157,14 @@ async fn run_tcp_hop(listen_host: &str, listen_port: u16, forward_addr: &str, ac
         if !active.load(Ordering::SeqCst) {
             break;
         }
-        tokio::select! {
-            result = listener.accept() => {
-                let (mut inbound, addr) = result?;
+        // Use timeout so we can check active flag periodically
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            listener.accept()
+        ).await;
+
+        match result {
+            Ok(Ok((mut inbound, addr))) => {
                 debug!("[CHAIN-TCP] Accepted from {} (forwarding to {})", addr, forward_addr);
                 let forward = forward_addr.to_string();
                 let active_clone = Arc::clone(&active);
@@ -196,7 +201,13 @@ async fn run_tcp_hop(listen_host: &str, listen_port: u16, forward_addr: &str, ac
                     }
                 });
             }
-            else => break,
+            Ok(Err(e)) => {
+                error!("[CHAIN-TCP] Failed to accept: {}", e);
+            }
+            Err(_) => {
+                // Timeout - loop will check active flag and break if needed
+                continue;
+            }
         }
     }
     Ok(())
@@ -212,31 +223,40 @@ async fn run_udp_hop(listen_host: &str, listen_port: u16, forward_addr: &str, ac
         if !active.load(Ordering::SeqCst) {
             break;
         }
-        tokio::select! {
-            result = inbound.recv_from(&mut buf) => {
-                let (n, src) = match result {
-                    Ok(x) => x,
-                    Err(e) => { warn!("[CHAIN-UDP] recv error: {}", e); continue; }
-                };
-                let fwd = forward_addr.to_string();
-                let ib = Arc::clone(&inbound);
-                let active_clone = Arc::clone(&active);
+        // Use timeout so we can check active flag periodically
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            inbound.recv_from(&mut buf)
+        ).await;
 
-                tokio::spawn(async move {
-                    let outbound = match UdpSocket::bind("0.0.0.0:0").await {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    if outbound.send_to(&buf[..n], &fwd).await.is_err() { return; }
-                    let mut resp = [0u8; 8192];
-                    let result = tokio::time::timeout(Duration::from_millis(500), outbound.recv_from(&mut resp)).await;
-                    if let Ok(Ok((m, _))) = result {
-                        let _ = ib.send_to(&resp[..m], src).await;
-                    }
-                });
+        let (n, src) = match result {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => {
+                warn!("[CHAIN-UDP] recv error: {}", e);
+                continue;
             }
-            else => break,
-        }
+            Err(_) => {
+                // Timeout - loop will check active flag and break if needed
+                continue;
+            }
+        };
+
+        let fwd = forward_addr.to_string();
+        let ib = Arc::clone(&inbound);
+        let active_clone = Arc::clone(&active);
+
+        tokio::spawn(async move {
+            let outbound = match UdpSocket::bind("0.0.0.0:0").await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            if outbound.send_to(&buf[..n], &fwd).await.is_err() { return; }
+            let mut resp = [0u8; 8192];
+            let result = tokio::time::timeout(Duration::from_secs(2), outbound.recv_from(&mut resp)).await;
+            if let Ok(Ok((m, _))) = result {
+                let _ = ib.send_to(&resp[..m], src).await;
+            }
+        });
     }
     Ok(())
 }
