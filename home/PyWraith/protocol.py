@@ -135,6 +135,13 @@ class WraithProtocol:
         Returns:
             pb.WraithMessage with RELAY_CREATE payload containing hops
         """
+        # Validate required hop keys
+        required_keys = {'listen_host', 'listen_port', 'forward_host', 'forward_port', 'protocol'}
+        for i, hop in enumerate(hops):
+            missing = required_keys - set(hop.keys())
+            if missing:
+                raise ValueError(f"Hop {i} missing required keys: {missing}")
+
         msg = pb.WraithMessage()
         msg.msg_type = pb.RELAY_CREATE
         msg.message_id = command_id

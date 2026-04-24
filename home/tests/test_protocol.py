@@ -2,6 +2,7 @@
 
 import pytest
 from PyWraith.protocol import WraithProtocol
+from PyWraith.proto_gen import wraith_pb2 as pb
 
 
 def test_create_command():
@@ -51,3 +52,43 @@ def test_encode_decode_message():
 
     # Decode should work (implementation depends on protobuf details)
     # For now just verify encoding doesn't crash
+
+
+def test_create_relay_chain_command():
+    """Test create_relay_chain_command creates proper relay chain messages."""
+    hops = [
+        {
+            'listen_host': '127.0.0.1',
+            'listen_port': 6666,
+            'forward_host': '127.0.0.1',
+            'forward_port': 7777,
+            'protocol': 'tcp'
+        },
+        {
+            'listen_host': '127.0.0.1',
+            'listen_port': 7777,
+            'forward_host': '10.0.0.1',
+            'forward_port': 443,
+            'protocol': 'udp'
+        }
+    ]
+
+    msg = WraithProtocol.create_relay_chain_command('cmd-123', hops)
+
+    assert msg.msg_type == pb.RELAY_CREATE
+    assert msg.message_id == 'cmd-123'
+    assert len(msg.relay_create.hops) == 2
+
+    # Verify first hop
+    assert msg.relay_create.hops[0].listen_host == '127.0.0.1'
+    assert msg.relay_create.hops[0].listen_port == 6666
+    assert msg.relay_create.hops[0].forward_host == '127.0.0.1'
+    assert msg.relay_create.hops[0].forward_port == 7777
+    assert msg.relay_create.hops[0].protocol == 'tcp'
+
+    # Verify second hop
+    assert msg.relay_create.hops[1].listen_host == '127.0.0.1'
+    assert msg.relay_create.hops[1].listen_port == 7777
+    assert msg.relay_create.hops[1].forward_host == '10.0.0.1'
+    assert msg.relay_create.hops[1].forward_port == 443
+    assert msg.relay_create.hops[1].protocol == 'udp'
