@@ -53,11 +53,12 @@ impl RelayCommands {
             let listen_port: u16 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
             let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
             let forward_port: u16 = cmd.params.get("forward_port").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let protocol_str = cmd.params.get("protocol").cloned().unwrap_or_else(|| "tcp".to_string());
+            let listen_protocol = cmd.params.get("listen_protocol").cloned().unwrap_or_else(|| "tcp".to_string());
+            let forward_protocol = cmd.params.get("forward_protocol").cloned().unwrap_or_else(|| "tcp".to_string());
 
             hops.push(RelayConfig::new(
-                RelayEndpoint::from_str(&listen_host, listen_port, &protocol_str),
-                RelayEndpoint::from_str(&forward_host, forward_port, &protocol_str),
+                RelayEndpoint::from_str(&listen_host, listen_port, &listen_protocol),
+                RelayEndpoint::from_str(&forward_host, forward_port, &forward_protocol),
             ));
         }
 

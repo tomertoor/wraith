@@ -89,29 +89,15 @@ class WraithClient:
         Returns:
             Tuple[bool, Dict[str, Any]]: (success, result)
         """
-        msg = WraithProtocol.create_relay_command(
-            command_id=str(uuid.uuid4()),
-            listen_host=listen_host,
-            listen_port=listen_port,
-            listen_protocol=listen_protocol,
-            forward_host=forward_host,
-            forward_port=forward_port,
-            forward_protocol=forward_protocol,
-        )
-        data = WraithProtocol.encode_message(msg)
-
-        try:
-            self.socket.sendall(data)
-            start = time.time()
-            while time.time() - start < 30:
-                response_data = WraithProtocol.read_frame(self.socket)
-                if response_data:
-                    response = WraithProtocol.decode_message(response_data)
-                    if response.msg_type == pb.COMMAND_RESULT:
-                        return True, WraithProtocol.parse_command_result(response)
-            return False, {'error': 'Timeout waiting for response'}
-        except Exception as e:
-            return False, {'error': str(e)}
+        params = {
+            'listen_host': listen_host,
+            'listen_port': str(listen_port),
+            'listen_protocol': listen_protocol,
+            'forward_host': forward_host,
+            'forward_port': str(forward_port),
+            'forward_protocol': forward_protocol,
+        }
+        return self.send_command('create_relay', params)
 
     def delete_relay(self, relay_id: str) -> Tuple[bool, Dict[str, Any]]:
         """Delete a relay by ID."""
