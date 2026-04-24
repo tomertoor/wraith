@@ -3,7 +3,7 @@
 import struct
 import time
 import uuid
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 from PyWraith.proto_gen import wraith_pb2 as pb
 
@@ -115,33 +115,31 @@ class WraithProtocol:
         return msg
 
     @staticmethod
-    def create_relay_chain_command(
+    def create_relay_command(
         command_id: str,
-        hops: List[Dict],
+        listen_host: str,
+        listen_port: int,
+        listen_protocol: str,
+        forward_host: str,
+        forward_port: int,
+        forward_protocol: str,
         timeout: int = 30
     ) -> pb.WraithMessage:
-        """Create a relay chain command with multiple hops.
+        """Create a relay command with independent listen/forward protocols.
 
         Args:
             command_id: Unique command identifier
-            hops: List of dicts, each containing:
-                - listen_host: str
-                - listen_port: int
-                - forward_host: str
-                - forward_port: int
-                - protocol: str ("tcp" or "udp")
+            listen_host: Host to bind for listening
+            listen_port: Port to bind for listening
+            listen_protocol: "tcp" or "udp"
+            forward_host: Host to forward connections to
+            forward_port: Port to forward connections to
+            forward_protocol: "tcp" or "udp"
             timeout: Command timeout in seconds
 
         Returns:
-            pb.WraithMessage with RELAY_CREATE payload containing hops
+            pb.WraithMessage with RELAY_CREATE payload
         """
-        # Validate required hop keys
-        required_keys = {'listen_host', 'listen_port', 'forward_host', 'forward_port', 'protocol'}
-        for i, hop in enumerate(hops):
-            missing = required_keys - set(hop.keys())
-            if missing:
-                raise ValueError(f"Hop {i} missing required keys: {missing}")
-
         msg = pb.WraithMessage()
         msg.msg_type = pb.RELAY_CREATE
         msg.message_id = command_id
@@ -150,14 +148,15 @@ class WraithProtocol:
         relay_create = pb.RelayCreate()
         relay_create.relay_id = str(uuid.uuid4())
 
-        for hop in hops:
-            h = pb.RelayHop()
-            h.listen_host = hop['listen_host']
-            h.listen_port = hop['listen_port']
-            h.forward_host = hop['forward_host']
-            h.forward_port = hop['forward_port']
-            h.protocol = hop['protocol']
-            relay_create.hops.append(h)
+        # Set listen endpoint
+        relay_create.config.listen.host = listen_host
+        relay_create.config.listen.port = listen_port
+        relay_create.config.listen.protocol = listen_protocol
+
+        # Set forward endpoint
+        relay_create.config.forward.host = forward_host
+        relay_create.config.forward.port = forward_port
+        relay_create.config.forward.protocol = forward_protocol
 
         msg.relay_create.CopyFrom(relay_create)
         return msg
