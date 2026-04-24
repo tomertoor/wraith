@@ -2,11 +2,6 @@ syntax = "proto3";
 
 package wraith;
 
-enum ProtocolType {
-    TCP = 0;
-    UDP = 1;
-}
-
 enum MessageType {
     REGISTRATION = 0;
     HEARTBEAT = 1;
