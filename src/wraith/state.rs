@@ -1,7 +1,7 @@
 use crate::relay::RelayManager;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 pub struct PeerConnection {
@@ -16,6 +16,7 @@ pub struct WraithState {
     pub wraith_id: String,
     pub peer_table: HashMap<String, PeerConnection>,
     pub seen_message_ids: std::sync::Mutex<HashSet<String>>,
+    pub pending_responses: std::sync::Mutex<HashMap<String, oneshot::Sender<crate::proto::wraith::WraithMessage>>>,
     pub hostname: String,
     pub username: String,
     pub os: String,
@@ -44,6 +45,7 @@ impl WraithState {
             wraith_id,
             peer_table: HashMap::new(),
             seen_message_ids: std::sync::Mutex::new(HashSet::new()),
+            pending_responses: std::sync::Mutex::new(HashMap::new()),
             hostname,
             username,
             os,
@@ -71,6 +73,7 @@ impl WraithState {
             wraith_id,
             peer_table: HashMap::new(),
             seen_message_ids: std::sync::Mutex::new(HashSet::new()),
+            pending_responses: std::sync::Mutex::new(HashMap::new()),
             hostname,
             username,
             os,
@@ -114,6 +117,16 @@ impl WraithState {
 
     pub fn mark_message_seen(&self, message_id: String) {
         self.seen_message_ids.lock().unwrap().insert(message_id);
+    }
+
+    /// Register a pending response for a forwarded command
+    pub fn register_pending_response(&self, message_id: String, tx: oneshot::Sender<crate::proto::wraith::WraithMessage>) {
+        self.pending_responses.lock().unwrap().insert(message_id, tx);
+    }
+
+    /// Check if there's a pending response for a message
+    pub fn take_pending_response(&self, message_id: &str) -> Option<oneshot::Sender<crate::proto::wraith::WraithMessage>> {
+        self.pending_responses.lock().unwrap().remove(message_id)
     }
 }
 

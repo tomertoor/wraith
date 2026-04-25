@@ -6,6 +6,7 @@ use crate::proto::wraith::{MessageType, WraithMessage};
 use crate::wraith::state::WraithState;
 use log::info;
 use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 
 #[derive(Clone)]
 pub struct MessageDispatcher {
@@ -37,24 +38,44 @@ impl MessageDispatcher {
     ) -> Option<WraithMessage> {
         let target = msg.target_wraith_id.clone();
         let local_id = state.lock().unwrap().wraith_id.clone();
+        let msg_id = msg.message_id.clone();
 
         // If targeted to us, dispatch locally
         if target.is_empty() || target == local_id {
             return self.dispatch(msg, state).await;
         }
 
-        // If targeted to a direct peer, forward to that peer
+        // If targeted to a direct peer, forward to that peer and wait for response
         {
             let peer = state.lock().unwrap().peer_table.get(&target).cloned();
             if let Some(peer) = peer {
-                // Clone to allow falling through to broadcast if send fails
-                if peer.sender.send(msg.clone()).await.is_ok() {
-                    return Some(MessageCodec::create_command_result(
-                        "".to_string(),
-                        "forwarded".to_string(),
-                        "".to_string(),
-                        0, 0, "".to_string(),
-                    ));
+                // Create oneshot channel for response
+                let (response_tx, response_rx) = oneshot::channel::<WraithMessage>();
+
+                // Register the pending response
+                state.lock().unwrap().register_pending_response(msg_id.clone(), response_tx);
+
+                // Clone message for sending
+                let msg_clone = msg.clone();
+
+                // Send to peer
+                if peer.sender.send(msg_clone).await.is_ok() {
+                    // Wait for response from the peer
+                    match response_rx.await {
+                        Ok(response) => {
+                            // Unregister the pending response
+                            state.lock().unwrap().take_pending_response(&msg_id);
+                            return Some(response);
+                        }
+                        Err(_) => {
+                            // Peer died or response lost
+                            info!("Peer response channel closed for message: {}", msg_id);
+                            state.lock().unwrap().take_pending_response(&msg_id);
+                        }
+                    }
+                } else {
+                    // Send failed, remove pending response
+                    state.lock().unwrap().take_pending_response(&msg_id);
                 }
             }
         }
@@ -65,6 +86,7 @@ impl MessageDispatcher {
             let _ = peer.sender.send(msg.clone()).await;
         }
 
+        // Broadcast doesn't wait for response
         Some(MessageCodec::create_command_result(
             "".to_string(),
             "broadcast".to_string(),

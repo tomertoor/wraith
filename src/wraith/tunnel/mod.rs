@@ -207,11 +207,19 @@ impl TunnelManager {
         loop {
             match PeerSession::read_message(&mut stream).await {
                 Ok(Some(msg)) => {
-                    // Extract dispatcher and state before await to avoid holding locks across await
-                    let (disp, state_arc) = {
+                    // Check if this is a response to a pending forwarded command
+                    // Extract state early to avoid holding locks across await
+                    let (pending_tx, disp, state_arc) = {
                         let disp = dispatcher.lock().unwrap().clone();
                         let state_val = state.lock().unwrap().clone();
-                        (disp, state_val)
+                        let msg_id = msg.message_id.clone();
+
+                        // Check if this message has a pending response waiting
+                        let pending_tx = state_val.as_ref().and_then(|s| {
+                            s.lock().unwrap().take_pending_response(&msg_id)
+                        });
+
+                        (pending_tx, disp, state_val)
                     };
 
                     // Check dedup before processing
@@ -227,6 +235,16 @@ impl TunnelManager {
                     // Route message via dispatcher if available
                     if let Some(disp) = disp {
                         if let Some(state_ref) = state_arc {
+                            // Check if this is a response destined for a pending oneshot
+                            if let Some(tx) = pending_tx {
+                                // This is a response to a forwarded command - send to the waiting caller
+                                if tx.send(msg.clone()).is_err() {
+                                    info!("Failed to send response to waiting caller for message: {}", msg_id);
+                                }
+                                // Don't re-dispatch - this message is already the final response
+                                continue;
+                            }
+
                             // Dispatch the message (route_message handles target_wraith_id routing)
                             let _ = disp.route_message(msg, state_ref).await;
                         }
