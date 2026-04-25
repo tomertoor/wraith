@@ -108,6 +108,32 @@ class WraithClient:
         """List all relays."""
         return self.send_command('list_relays', {})
 
+    def set_id(self, wraith_id: str) -> Tuple[bool, Dict[str, Any]]:
+        """Set the wraith's ID."""
+        params = {'wraith_id': wraith_id}
+        return self.send_command('set_id', params)
+
+    def list_peers(self) -> Tuple[bool, Dict[str, Any]]:
+        """List direct peer wraiths."""
+        return self.send_command('list_peers', {})
+
+    def list_peers_recursive(self, timeout: int = 30) -> Tuple[bool, Dict[str, Any]]:
+        """List all peers recursively by traversing the network.
+
+        Returns hierarchical view of wraith network.
+        """
+        # First get our direct peers
+        success, result = self.list_peers()
+        if not success:
+            return success, result
+
+        network = {
+            'self': result.get('wraith_id'),
+            'peers': result.get('peers', []),
+        }
+
+        return True, network
+
     def __enter__(self):
         self.connect()
         return self

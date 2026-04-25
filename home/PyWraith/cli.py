@@ -4,9 +4,9 @@
 import sys
 import argparse
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
-from IPython.terminal.interactiveshell import TerminalInteractiveShell
+import click
 
 from PyWraith.client import WraithClient
 from PyWraith.server import WraithServer
@@ -319,6 +319,43 @@ def main():
         cli.do_listen(str(args.listen_port))
 
     cli.run_shell()
+
+
+def parse_host_port(addr: str) -> Tuple[str, int]:
+    """Parse HOST:PORT string."""
+    parts = addr.split(':')
+    if len(parts) == 2:
+        return parts[0], int(parts[1])
+    return addr, 4444
+
+
+@click.group()
+def cli_group():
+    """Wraith agent commands."""
+    pass
+
+
+@cli_group.command('agent-connect')
+@click.argument('host_port')
+def agent_connect(host_port: str):
+    """Connect to a peer wraith at HOST:PORT."""
+    host, port = parse_host_port(host_port)
+    client = WraithClient(host, port)
+    if not client.connect():
+        click.echo(f"Failed to connect to {host}:{port}")
+        return
+    click.echo(f"Connected to {host}:{port}")
+    # TODO: Implement agent registration flow
+    client.disconnect()
+
+
+@cli_group.command('agent-listen')
+@click.argument('host_port')
+def agent_listen(host_port: str):
+    """Listen for peer wraith connections on HOST:PORT."""
+    host, port = parse_host_port(host_port)
+    click.echo(f"Agent listen mode on {host}:{port} - not yet implemented")
+    # TODO: Implement agent listener mode
 
 
 if __name__ == "__main__":

@@ -175,3 +175,56 @@ class WraithProtocol:
             'message_id': msg.message_id,
             'timestamp': msg.timestamp,
         }
+
+    @staticmethod
+    def create_wraith_registration(
+        wraith_id: str,
+        hostname: str,
+        os: str
+    ) -> pb.WraithMessage:
+        """Create WRAITH_REGISTRATION message for peer connections."""
+        reg = pb.WraithRegistration(
+            wraith_id=wraith_id,
+            hostname=hostname,
+            os=os,
+            connected_at=int(time.time() * 1000)
+        )
+        msg = pb.WraithMessage(
+            msg_type=pb.WRAITH_REGISTRATION,
+            message_id=str(uuid.uuid4()),
+            timestamp=int(time.time() * 1000),
+            wraith_registration=reg
+        )
+        return msg
+
+    @staticmethod
+    def create_peer_list() -> pb.WraithMessage:
+        """Create PEER_LIST message."""
+        msg = pb.WraithMessage(
+            msg_type=pb.PEER_LIST,
+            message_id=str(uuid.uuid4()),
+            timestamp=int(time.time() * 1000),
+            peer_list=pb.PeerList()
+        )
+        return msg
+
+    @staticmethod
+    def parse_peer_update(msg: pb.WraithMessage) -> Dict[str, Any]:
+        """Extract peer update fields as a dict."""
+        update = msg.peer_update
+        return {
+            'wraith_id': update.wraith_id,
+            'hostname': update.hostname,
+            'action': update.action,
+            'timestamp': update.timestamp,
+        }
+
+    @staticmethod
+    def parse_peer_list_response(msg: pb.WraithMessage) -> Dict[str, Any]:
+        """Extract peer list response as a dict."""
+        resp = msg.peer_list_response
+        return {
+            'wraith_id': resp.wraith_id,
+            'peers': [{'wraith_id': p.wraith_id, 'hostname': p.hostname, 'connected': p.connected}
+                      for p in resp.peers],
+        }
