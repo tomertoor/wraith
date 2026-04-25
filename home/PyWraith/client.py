@@ -16,6 +16,19 @@ class WraithClient:
         self.host = host
         self.port = port
         self.socket: Optional[socket.socket] = None
+        self._target: str = ""
+
+    def set_target(self, wraith_id: str):
+        """Set the global routing target."""
+        self._target = wraith_id
+
+    def get_target(self) -> str:
+        """Get current target."""
+        return self._target
+
+    def clear_target(self):
+        """Clear the routing target."""
+        self._target = ""
 
     def connect(self) -> bool:
         """Connect to wraith server."""
@@ -46,8 +59,11 @@ class WraithClient:
         if not self.socket:
             return False, {'error': 'Not connected'}
 
+        if not self._target:
+            return False, {'error': 'No target wraith set. Use set_target(<id>) first.'}
+
         command_id = str(uuid.uuid4())
-        msg = WraithProtocol.create_command(command_id, action, params, timeout)
+        msg = WraithProtocol.create_command(command_id, action, params, timeout, target_wraith_id=self._target)
         data = WraithProtocol.encode_message(msg)
 
         try:
