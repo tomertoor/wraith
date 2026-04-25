@@ -241,6 +241,7 @@ impl TunnelManager {
             payload: Some(crate::proto::wraith::wraith_message::Payload::WraithRegistration(reg)),
             message_id: uuid::Uuid::new_v4().to_string(),
             timestamp: chrono::Utc::now().timestamp_millis(),
+            target_wraith_id: String::new(),
         };
 
         // Encode and send registration message

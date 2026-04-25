@@ -8,6 +8,9 @@ pub struct WraithMessage {
     pub message_id: ::prost::alloc::string::String,
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
+    /// routing target for agent chain
+    #[prost(string, tag = "16")]
+    pub target_wraith_id: ::prost::alloc::string::String,
     #[prost(
         oneof = "wraith_message::Payload",
         tags = "4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15"
