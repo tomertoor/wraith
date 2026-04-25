@@ -91,6 +91,7 @@ class WraithClient:
         forward_host: str,
         forward_port: int,
         forward_protocol: str,
+        target_peer: Optional[str] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
         """Create a relay with protocol translation support.
 
@@ -101,6 +102,7 @@ class WraithClient:
             forward_host: Host to forward connections to
             forward_port: Port to forward connections to
             forward_protocol: "tcp" or "udp"
+            target_peer: Optional wraith_id to create relay on remote wraith
 
         Returns:
             Tuple[bool, Dict[str, Any]]: (success, result)
@@ -113,6 +115,8 @@ class WraithClient:
             'forward_port': str(forward_port),
             'forward_protocol': forward_protocol,
         }
+        if target_peer:
+            params['target_wraith_id'] = target_peer
         return self.send_command('create_relay', params)
 
     def delete_relay(self, relay_id: str) -> Tuple[bool, Dict[str, Any]]:

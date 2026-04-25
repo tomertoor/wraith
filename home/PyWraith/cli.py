@@ -73,6 +73,7 @@ class WraithCLI:
             'list_relays': self.do_list_relays,
             'set_id': self.do_set_id,
             'list_peers': self.do_list_peers,
+            'set_target': self.do_set_target,
             'listen': self.do_listen,
             'stop_listening': self.do_stop_listening,
             'agents': self.do_agents,
@@ -166,16 +167,30 @@ class WraithCLI:
             print("Disconnected")
 
     def do_create_relay(self, arg: str = ""):
-        """%create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port> - Create protocol-relaying relay"""
+        """%create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port> [--target <wraith_id>] - Create protocol-relaying relay"""
         if not self.connected:
             print("Not connected. Use 'connect' first.")
             return
 
-        # Parse: -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333
+        # Parse: -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333 [--target <wraith_id>]
         parts = arg.split()
+
+        # Parse --target at end if present
+        target_peer = None
+        filtered_parts = []
+        i = 0
+        while i < len(parts):
+            if parts[i] == '--target' and i + 1 < len(parts):
+                target_peer = parts[i + 1]
+                i += 2
+            else:
+                filtered_parts.append(parts[i])
+                i += 1
+        parts = filtered_parts
+
         if len(parts) != 10:
-            print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port>")
-            print("Example: create_relay -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333")
+            print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port> [--target <wraith_id>]")
+            print("Example: create_relay -l tcp -L 0.0.0.0 2222 -f udp -F 127.0.0.1 3333 --target wraith-B")
             return
 
         # Parse flags
@@ -188,7 +203,7 @@ class WraithCLI:
             forward_port = int(parts[9])
         except (IndexError, ValueError) as e:
             print(f"Parse error: {e}")
-            print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port>")
+            print("Usage: create_relay -l <protocol> -L <host> <port> -f <protocol> -F <host> <port> [--target <wraith_id>]")
             return
 
         # Validate protocols
@@ -209,7 +224,8 @@ class WraithCLI:
 
         success, result = self.client.create_relay(
             listen_host, listen_port, listen_protocol,
-            forward_host, forward_port, forward_protocol
+            forward_host, forward_port, forward_protocol,
+            target_peer=target_peer
         )
 
         if success:
@@ -274,6 +290,28 @@ class WraithCLI:
             print(f"Peers:\n{output}")
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
+
+    def do_set_target(self, arg: str = ""):
+        """%set_target [wraith_id|none] - Set/clear global routing target."""
+        if not self.connected:
+            print("Not connected. Use 'connect' first.")
+            return
+
+        arg = arg.strip()
+        if not arg:
+            current = self.client.get_target()
+            if current:
+                print(f"Current target: {current}")
+            else:
+                print("No target set")
+            return
+
+        if arg == "none":
+            self.client.clear_target()
+            print("Target cleared")
+        else:
+            self.client.set_target(arg)
+            print(f"Target set to: {arg}")
 
     def do_wraith_listen(self, arg: str = ""):
         """%wraith_listen [port] - Start listening for peer wraith connections."""
