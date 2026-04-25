@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+#[derive(Clone)]
 pub struct PeerConnection {
     pub wraith_id: String,
     pub hostname: String,

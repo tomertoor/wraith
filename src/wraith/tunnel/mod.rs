@@ -20,6 +20,8 @@ pub struct TunnelManager {
     sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
     peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
     peer_remove_callback: Arc<Mutex<Option<PeerRemoveCallback>>>,
+    dispatcher: Arc<Mutex<Option<crate::wraith::dispatcher::MessageDispatcher>>>,
+    state: Arc<Mutex<Option<Arc<Mutex<crate::wraith::state::WraithState>>>>>,
 }
 
 impl TunnelManager {
@@ -28,7 +30,19 @@ impl TunnelManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             peer_add_callback: Arc::new(Mutex::new(None)),
             peer_remove_callback: Arc::new(Mutex::new(None)),
+            dispatcher: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Set the dispatcher for routing peer messages
+    pub fn set_dispatcher(&self, dispatcher: crate::wraith::dispatcher::MessageDispatcher) {
+        *self.dispatcher.lock().unwrap() = Some(dispatcher);
+    }
+
+    /// Set the state for dedup checking
+    pub fn set_state(&self, state: Arc<Mutex<crate::wraith::state::WraithState>>) {
+        *self.state.lock().unwrap() = Some(state);
     }
 
     /// Register a callback invoked when a peer is added.
@@ -105,6 +119,8 @@ impl TunnelManager {
         info!("Listening for peer connections on {}", addr);
         let sessions = Arc::clone(&self.sessions);
         let peer_add_callback = Arc::clone(&self.peer_add_callback);
+        let dispatcher = Arc::clone(&self.dispatcher);
+        let state = Arc::clone(&self.state);
 
         loop {
             match listener.accept().await {
@@ -112,8 +128,10 @@ impl TunnelManager {
                     info!("Peer connection from: {}", peer_addr);
                     let sessions = Arc::clone(&sessions);
                     let peer_add_callback = Arc::clone(&peer_add_callback);
+                    let dispatcher = Arc::clone(&dispatcher);
+                    let state = Arc::clone(&state);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_peer_connection(stream, sessions, peer_add_callback).await {
+                        if let Err(e) = Self::handle_peer_connection(stream, sessions, peer_add_callback, dispatcher, state).await {
                             warn!("Peer connection handler error: {}", e);
                         }
                     });
@@ -129,6 +147,8 @@ impl TunnelManager {
         stream: TcpStream,
         sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
         peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
+        dispatcher: Arc<Mutex<Option<crate::wraith::dispatcher::MessageDispatcher>>>,
+        state: Arc<Mutex<Option<Arc<Mutex<crate::wraith::state::WraithState>>>>>,
     ) -> Result<()> {
         use crate::wraith::tunnel::PeerSession;
 
@@ -180,6 +200,46 @@ impl TunnelManager {
                 }
 
                 info!("Registered peer: {}", wraith_id);
+            }
+        }
+
+        // Message loop: read commands from stream 0 and dispatch with dedup
+        loop {
+            match PeerSession::read_message(&mut stream).await {
+                Ok(Some(msg)) => {
+                    // Extract dispatcher and state before await to avoid holding locks across await
+                    let (disp, state_arc) = {
+                        let disp = dispatcher.lock().unwrap().clone();
+                        let state_val = state.lock().unwrap().clone();
+                        (disp, state_val)
+                    };
+
+                    // Check dedup before processing
+                    let msg_id = msg.message_id.clone();
+                    if let Some(ref state_ref) = state_arc {
+                        if state_ref.lock().unwrap().has_seen_message(&msg_id) {
+                            info!("Skipping duplicate message: {}", msg_id);
+                            continue;
+                        }
+                        state_ref.lock().unwrap().mark_message_seen(msg_id.clone());
+                    }
+
+                    // Route message via dispatcher if available
+                    if let Some(disp) = disp {
+                        if let Some(state_ref) = state_arc {
+                            // Dispatch the message (route_message handles target_wraith_id routing)
+                            let _ = disp.route_message(msg, state_ref).await;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    info!("Peer stream ended");
+                    break;
+                }
+                Err(e) => {
+                    warn!("Error reading from peer stream: {}", e);
+                    break;
+                }
             }
         }
 

