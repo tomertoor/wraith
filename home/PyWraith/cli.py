@@ -11,6 +11,8 @@ import click
 from PyWraith.client import WraithClient
 from PyWraith.server import WraithServer
 
+from IPython.terminal.interactiveshell import TerminalInteractiveShell
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -69,6 +71,8 @@ class WraithCLI:
             'create_relay': self.do_create_relay,
             'delete_relay': self.do_delete_relay,
             'list_relays': self.do_list_relays,
+            'set_id': self.do_set_id,
+            'list_peers': self.do_list_peers,
             'listen': self.do_listen,
             'stop_listening': self.do_stop_listening,
             'agents': self.do_agents,
@@ -240,6 +244,35 @@ class WraithCLI:
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
 
+    def do_set_id(self, arg: str = ""):
+        """%set_id <wraith_id> - Set the wraith's ID."""
+        if not self.connected:
+            print("Not connected. Use 'connect' first.")
+            return
+
+        if not arg.strip():
+            print("Usage: set_id <wraith_id>")
+            return
+
+        success, result = self.client.set_id(arg.strip())
+        if success:
+            print(f"Wraith ID set to: {arg.strip()}")
+        else:
+            print(f"Failed: {result.get('error', 'unknown error')}")
+
+    def do_list_peers(self, arg: str = ""):
+        """%list_peers - List direct peer wraiths."""
+        if not self.connected:
+            print("Not connected. Use 'connect' first.")
+            return
+
+        success, result = self.client.list_peers()
+        if success:
+            output = result.get('output', '')
+            print(f"Peers:\n{output}")
+        else:
+            print(f"Failed: {result.get('error', 'unknown error')}")
+
     def do_status(self, arg: str = ""):
         """%status - Show current connection status."""
         if self.mode == "listen":
@@ -306,6 +339,7 @@ def main():
     parser.add_argument("--port", type=int, default=4444, help="Wraith server port")
     parser.add_argument("--listen", action="store_true", help="Listen mode (receive connections from wraith)")
     parser.add_argument("--listen-port", type=int, default=4445, help="Port to listen on for wraith agents")
+    parser.add_argument("--set-id", type=str, help="Set wraith ID after connecting")
     args = parser.parse_args()
 
     cli = WraithCLI(
@@ -317,6 +351,12 @@ def main():
 
     if args.listen:
         cli.do_listen(str(args.listen_port))
+    else:
+        cli.do_connect()
+
+    # Set ID if requested
+    if args.set_id:
+        cli.do_set_id(args.set_id)
 
     cli.run_shell()
 
