@@ -1,17 +1,20 @@
 use crate::commands::command::Command;
 use crate::proto::wraith::{Command as ProtoCommand, CommandResult};
 use crate::relay::{RelayConfig, RelayEndpoint, RelayManager, Transport};
+use crate::wraith::state::WraithState;
+use crate::wraith::tunnel::TunnelManager;
 use log::{debug, info};
 use std::sync::Arc;
 use std::sync::Mutex;
 
 pub struct RelayCommands {
     relay_manager: Arc<Mutex<RelayManager>>,
+    tunnel_manager: Arc<TunnelManager>,
 }
 
 impl RelayCommands {
-    pub fn new(relay_manager: Arc<Mutex<RelayManager>>) -> Self {
-        Self { relay_manager }
+    pub fn new(relay_manager: Arc<Mutex<RelayManager>>, tunnel_manager: Arc<TunnelManager>) -> Self {
+        Self { relay_manager, tunnel_manager }
     }
 
     pub fn handle_create_relay(&self, cmd: &ProtoCommand, local_wraith_id: &str) -> CommandResult {

@@ -13,7 +13,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cwraith.proto\x12\x06wraith\"\xc8\x03\n\rWraithMessage\x12%\n\x08msg_type\x18\x01 \x01(\x0e\x32\x13.wraith.MessageType\x12\x12\n\nmessage_id\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\x03\x12,\n\x0cregistration\x18\x04 \x01(\x0b\x32\x14.wraith.RegistrationH\x00\x12&\n\theartbeat\x18\x05 \x01(\x0b\x32\x11.wraith.HeartbeatH\x00\x12\"\n\x07\x63ommand\x18\x06 \x01(\x0b\x32\x0f.wraith.CommandH\x00\x12\'\n\x06result\x18\x07 \x01(\x0b\x32\x15.wraith.CommandResultH\x00\x12+\n\x0crelay_create\x18\x08 \x01(\x0b\x32\x13.wraith.RelayCreateH\x00\x12+\n\x0crelay_delete\x18\t \x01(\x0b\x32\x13.wraith.RelayDeleteH\x00\x12\'\n\nrelay_list\x18\n \x01(\x0b\x32\x11.wraith.RelayListH\x00\x12\x38\n\x13relay_list_response\x18\x0b \x01(\x0b\x32\x19.wraith.RelayListResponseH\x00\x42\t\n\x07payload\"R\n\x0cRegistration\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x10\n\x08username\x18\x02 \x01(\t\x12\n\n\x02os\x18\x03 \x01(\t\x12\x12\n\nip_address\x18\x04 \x01(\t\"6\n\tHeartbeat\x12\x19\n\x11last_command_time\x18\x01 \x01(\x03\x12\x0e\n\x06status\x18\x02 \x01(\t\"\x9a\x01\n\x07\x43ommand\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x02 \x01(\t\x12+\n\x06params\x18\x03 \x03(\x0b\x32\x1b.wraith.Command.ParamsEntry\x12\x0f\n\x07timeout\x18\x04 \x01(\x05\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"z\n\rCommandResult\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x0e\n\x06output\x18\x03 \x01(\t\x12\x11\n\texit_code\x18\x04 \x01(\x05\x12\x13\n\x0b\x64uration_ms\x18\x05 \x01(\x03\x12\r\n\x05\x65rror\x18\x06 \x01(\t\"=\n\rRelayEndpoint\x12\x0c\n\x04host\x18\x01 \x01(\t\x12\x0c\n\x04port\x18\x02 \x01(\x05\x12\x10\n\x08protocol\x18\x03 \x01(\t\"\\\n\x0bRelayConfig\x12%\n\x06listen\x18\x01 \x01(\x0b\x32\x15.wraith.RelayEndpoint\x12&\n\x07\x66orward\x18\x02 \x01(\x0b\x32\x15.wraith.RelayEndpoint\"D\n\x0bRelayCreate\x12\x10\n\x08relay_id\x18\x01 \x01(\t\x12#\n\x06\x63onfig\x18\x02 \x01(\x0b\x32\x13.wraith.RelayConfig\"\x1f\n\x0bRelayDelete\x12\x10\n\x08relay_id\x18\x01 \x01(\t\"\x0b\n\tRelayList\"6\n\x11RelayListResponse\x12!\n\x06relays\x18\x01 \x03(\x0b\x32\x11.wraith.RelayInfo\"\x83\x01\n\tRelayInfo\x12\x10\n\x08relay_id\x18\x01 \x01(\t\x12\x13\n\x0blisten_host\x18\x02 \x01(\t\x12\x13\n\x0blisten_port\x18\x03 \x01(\x05\x12\x14\n\x0c\x66orward_host\x18\x04 \x01(\t\x12\x14\n\x0c\x66orward_port\x18\x05 \x01(\x05\x12\x0e\n\x06\x61\x63tive\x18\x06 \x01(\x08*\x9c\x01\n\x0bMessageType\x12\x10\n\x0cREGISTRATION\x10\x00\x12\r\n\tHEARTBEAT\x10\x01\x12\x0b\n\x07\x43OMMAND\x10\x02\x12\x12\n\x0e\x43OMMAND_RESULT\x10\x03\x12\x10\n\x0cRELAY_CREATE\x10\x04\x12\x10\n\x0cRELAY_DELETE\x10\x05\x12\x0e\n\nRELAY_LIST\x10\x06\x12\x17\n\x13RELAY_LIST_RESPONSE\x10\x07\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cwraith.proto\x12\x06wraith\"\x8d\x05\n\rWraithMessage\x12%\n\x08msg_type\x18\x01 \x01(\x0e\x32\x13.wraith.MessageType\x12\x12\n\nmessage_id\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\x03\x12,\n\x0cregistration\x18\x04 \x01(\x0b\x32\x14.wraith.RegistrationH\x00\x12&\n\theartbeat\x18\x05 \x01(\x0b\x32\x11.wraith.HeartbeatH\x00\x12\"\n\x07\x63ommand\x18\x06 \x01(\x0b\x32\x0f.wraith.CommandH\x00\x12\'\n\x06result\x18\x07 \x01(\x0b\x32\x15.wraith.CommandResultH\x00\x12+\n\x0crelay_create\x18\x08 \x01(\x0b\x32\x13.wraith.RelayCreateH\x00\x12+\n\x0crelay_delete\x18\t \x01(\x0b\x32\x13.wraith.RelayDeleteH\x00\x12\'\n\nrelay_list\x18\n \x01(\x0b\x32\x11.wraith.RelayListH\x00\x12\x38\n\x13relay_list_response\x18\x0b \x01(\x0b\x32\x19.wraith.RelayListResponseH\x00\x12\x39\n\x13wraith_registration\x18\x0c \x01(\x0b\x32\x1a.wraith.WraithRegistrationH\x00\x12)\n\x0bpeer_update\x18\r \x01(\x0b\x32\x12.wraith.PeerUpdateH\x00\x12%\n\tpeer_list\x18\x0e \x01(\x0b\x32\x10.wraith.PeerListH\x00\x12\x36\n\x12peer_list_response\x18\x0f \x01(\x0b\x32\x18.wraith.PeerListResponseH\x00\x42\t\n\x07payload\"R\n\x0cRegistration\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x10\n\x08username\x18\x02 \x01(\t\x12\n\n\x02os\x18\x03 \x01(\t\x12\x12\n\nip_address\x18\x04 \x01(\t\"6\n\tHeartbeat\x12\x19\n\x11last_command_time\x18\x01 \x01(\x03\x12\x0e\n\x06status\x18\x02 \x01(\t\"\x9a\x01\n\x07\x43ommand\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x02 \x01(\t\x12+\n\x06params\x18\x03 \x03(\x0b\x32\x1b.wraith.Command.ParamsEntry\x12\x0f\n\x07timeout\x18\x04 \x01(\x05\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"z\n\rCommandResult\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x0e\n\x06output\x18\x03 \x01(\t\x12\x11\n\texit_code\x18\x04 \x01(\x05\x12\x13\n\x0b\x64uration_ms\x18\x05 \x01(\x03\x12\r\n\x05\x65rror\x18\x06 \x01(\t\"=\n\rRelayEndpoint\x12\x0c\n\x04host\x18\x01 \x01(\t\x12\x0c\n\x04port\x18\x02 \x01(\x05\x12\x10\n\x08protocol\x18\x03 \x01(\t\"\\\n\x0bRelayConfig\x12%\n\x06listen\x18\x01 \x01(\x0b\x32\x15.wraith.RelayEndpoint\x12&\n\x07\x66orward\x18\x02 \x01(\x0b\x32\x15.wraith.RelayEndpoint\"D\n\x0bRelayCreate\x12\x10\n\x08relay_id\x18\x01 \x01(\t\x12#\n\x06\x63onfig\x18\x02 \x01(\x0b\x32\x13.wraith.RelayConfig\"\x1f\n\x0bRelayDelete\x12\x10\n\x08relay_id\x18\x01 \x01(\t\"\x0b\n\tRelayList\"6\n\x11RelayListResponse\x12!\n\x06relays\x18\x01 \x03(\x0b\x32\x11.wraith.RelayInfo\"\x83\x01\n\tRelayInfo\x12\x10\n\x08relay_id\x18\x01 \x01(\t\x12\x13\n\x0blisten_host\x18\x02 \x01(\t\x12\x13\n\x0blisten_port\x18\x03 \x01(\x05\x12\x14\n\x0c\x66orward_host\x18\x04 \x01(\t\x12\x14\n\x0c\x66orward_port\x18\x05 \x01(\x05\x12\x0e\n\x06\x61\x63tive\x18\x06 \x01(\x08\"[\n\x12WraithRegistration\x12\x11\n\twraith_id\x18\x01 \x01(\t\x12\x10\n\x08hostname\x18\x02 \x01(\t\x12\n\n\x02os\x18\x03 \x01(\t\x12\x14\n\x0c\x63onnected_at\x18\x04 \x01(\x03\"B\n\x08PeerInfo\x12\x11\n\twraith_id\x18\x01 \x01(\t\x12\x10\n\x08hostname\x18\x02 \x01(\t\x12\x11\n\tconnected\x18\x03 \x01(\x08\"\n\n\x08PeerList\"F\n\x10PeerListResponse\x12\x11\n\twraith_id\x18\x01 \x01(\t\x12\x1f\n\x05peers\x18\x02 \x03(\x0b\x32\x10.wraith.PeerInfo\"T\n\nPeerUpdate\x12\x11\n\twraith_id\x18\x01 \x01(\t\x12\x10\n\x08hostname\x18\x02 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x03 \x01(\t\x12\x11\n\ttimestamp\x18\x04 \x01(\x03*\xed\x01\n\x0bMessageType\x12\x10\n\x0cREGISTRATION\x10\x00\x12\r\n\tHEARTBEAT\x10\x01\x12\x0b\n\x07\x43OMMAND\x10\x02\x12\x12\n\x0e\x43OMMAND_RESULT\x10\x03\x12\x10\n\x0cRELAY_CREATE\x10\x04\x12\x10\n\x0cRELAY_DELETE\x10\x05\x12\x0e\n\nRELAY_LIST\x10\x06\x12\x17\n\x13RELAY_LIST_RESPONSE\x10\x07\x12\x17\n\x13WRAITH_REGISTRATION\x10\x08\x12\x0f\n\x0bPEER_UPDATE\x10\t\x12\r\n\tPEER_LIST\x10\n\x12\x16\n\x12PEER_LIST_RESPONSE\x10\x0b\x62\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'wraith_pb2', globals())
@@ -22,32 +22,42 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _COMMAND_PARAMSENTRY._options = None
   _COMMAND_PARAMSENTRY._serialized_options = b'8\001'
-  _MESSAGETYPE._serialized_start=1368
-  _MESSAGETYPE._serialized_end=1524
+  _MESSAGETYPE._serialized_start=1896
+  _MESSAGETYPE._serialized_end=2133
   _WRAITHMESSAGE._serialized_start=25
-  _WRAITHMESSAGE._serialized_end=481
-  _REGISTRATION._serialized_start=483
-  _REGISTRATION._serialized_end=565
-  _HEARTBEAT._serialized_start=567
-  _HEARTBEAT._serialized_end=621
-  _COMMAND._serialized_start=624
-  _COMMAND._serialized_end=778
-  _COMMAND_PARAMSENTRY._serialized_start=733
-  _COMMAND_PARAMSENTRY._serialized_end=778
-  _COMMANDRESULT._serialized_start=780
-  _COMMANDRESULT._serialized_end=902
-  _RELAYENDPOINT._serialized_start=904
-  _RELAYENDPOINT._serialized_end=965
-  _RELAYCONFIG._serialized_start=967
-  _RELAYCONFIG._serialized_end=1059
-  _RELAYCREATE._serialized_start=1061
-  _RELAYCREATE._serialized_end=1129
-  _RELAYDELETE._serialized_start=1131
-  _RELAYDELETE._serialized_end=1162
-  _RELAYLIST._serialized_start=1164
-  _RELAYLIST._serialized_end=1175
-  _RELAYLISTRESPONSE._serialized_start=1177
-  _RELAYLISTRESPONSE._serialized_end=1231
-  _RELAYINFO._serialized_start=1234
-  _RELAYINFO._serialized_end=1365
+  _WRAITHMESSAGE._serialized_end=678
+  _REGISTRATION._serialized_start=680
+  _REGISTRATION._serialized_end=762
+  _HEARTBEAT._serialized_start=764
+  _HEARTBEAT._serialized_end=818
+  _COMMAND._serialized_start=821
+  _COMMAND._serialized_end=975
+  _COMMAND_PARAMSENTRY._serialized_start=930
+  _COMMAND_PARAMSENTRY._serialized_end=975
+  _COMMANDRESULT._serialized_start=977
+  _COMMANDRESULT._serialized_end=1099
+  _RELAYENDPOINT._serialized_start=1101
+  _RELAYENDPOINT._serialized_end=1162
+  _RELAYCONFIG._serialized_start=1164
+  _RELAYCONFIG._serialized_end=1256
+  _RELAYCREATE._serialized_start=1258
+  _RELAYCREATE._serialized_end=1326
+  _RELAYDELETE._serialized_start=1328
+  _RELAYDELETE._serialized_end=1359
+  _RELAYLIST._serialized_start=1361
+  _RELAYLIST._serialized_end=1372
+  _RELAYLISTRESPONSE._serialized_start=1374
+  _RELAYLISTRESPONSE._serialized_end=1428
+  _RELAYINFO._serialized_start=1431
+  _RELAYINFO._serialized_end=1562
+  _WRAITHREGISTRATION._serialized_start=1564
+  _WRAITHREGISTRATION._serialized_end=1655
+  _PEERINFO._serialized_start=1657
+  _PEERINFO._serialized_end=1723
+  _PEERLIST._serialized_start=1725
+  _PEERLIST._serialized_end=1735
+  _PEERLISTRESPONSE._serialized_start=1737
+  _PEERLISTRESPONSE._serialized_end=1807
+  _PEERUPDATE._serialized_start=1809
+  _PEERUPDATE._serialized_end=1893
 # @@protoc_insertion_point(module_scope)

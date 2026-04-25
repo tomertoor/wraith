@@ -79,6 +79,8 @@ class WraithCLI:
             'status': self.do_status,
             'help': self.do_help,
             'exit': self.do_exit,
+            'wraith_listen': self.do_wraith_listen,
+            'wraith_connect': self.do_wraith_connect,
         }
 
         for name, method in magic_methods.items():
@@ -273,6 +275,41 @@ class WraithCLI:
         else:
             print(f"Failed: {result.get('error', 'unknown error')}")
 
+    def do_wraith_listen(self, arg: str = ""):
+        """%wraith_listen [port] - Start listening for peer wraith connections."""
+        if not self.connected:
+            print("Not connected. Use 'connect' first.")
+            return
+
+        args = arg.split()
+        port = int(args[0]) if len(args) > 0 else 4445
+
+        success, result = self.client.wraith_listen(port)
+        if success:
+            print(f"Wraith listening on port {port} for peer connections")
+        else:
+            print(f"Failed: {result.get('error', 'unknown error')}")
+
+    def do_wraith_connect(self, arg: str = ""):
+        """%wraith_connect <host> [port] - Connect to a peer wraith."""
+        if not self.connected:
+            print("Not connected. Use 'connect' first.")
+            return
+
+        args = arg.split()
+        if len(args) < 1:
+            print("Usage: wraith_connect <host> [port]")
+            return
+
+        host = args[0]
+        port = int(args[1]) if len(args) > 1 else 4445
+
+        success, result = self.client.wraith_connect(host, port)
+        if success:
+            print(f"Connecting to peer wraith at {host}:{port}")
+        else:
+            print(f"Failed: {result.get('error', 'unknown error')}")
+
     def do_status(self, arg: str = ""):
         """%status - Show current connection status."""
         if self.mode == "listen":
@@ -292,6 +329,10 @@ class WraithCLI:
             'create_relay': self.do_create_relay,
             'delete_relay': self.do_delete_relay,
             'list_relays': self.do_list_relays,
+            'set_id': self.do_set_id,
+            'list_peers': self.do_list_peers,
+            'wraith_listen': self.do_wraith_listen,
+            'wraith_connect': self.do_wraith_connect,
             'listen': self.do_listen,
             'stop_listening': self.do_stop_listening,
             'agents': self.do_agents,

@@ -3,7 +3,7 @@ pub mod session;
 pub use session::PeerSession;
 
 use anyhow::Result;
-use log::{info, warn};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -106,6 +106,69 @@ impl TunnelManager {
             }
         }
 
+        Ok(())
+    }
+
+    /// Connect to a remote peer wraith
+    pub async fn connect_to_peer(
+        &self,
+        addr: String,
+        wraith_id: String,
+        hostname: String,
+        os: String,
+    ) -> anyhow::Result<()> {
+        use futures::io::AsyncWriteExt;
+
+        // Connect to peer via TCP
+        let stream = TcpStream::connect(&addr).await?;
+        let peer_addr = stream.peer_addr()?;
+        info!("Connecting to peer at {}", peer_addr);
+
+        // Create Yamux connection as client
+        let config = yamux::Config::default();
+        let conn = yamux::Connection::new(stream.compat(), config, yamux::Mode::Client);
+
+        // Open stream 0 for registration
+        let mut stream = conn.control().open_stream().await?;
+
+        // Send WraithRegistration
+        let reg = crate::proto::wraith::WraithRegistration {
+            wraith_id: wraith_id.clone(),
+            hostname: hostname.clone(),
+            os,
+            connected_at: chrono::Utc::now().timestamp_millis(),
+        };
+
+        let reg_msg = crate::proto::wraith::WraithMessage {
+            msg_type: crate::proto::wraith::MessageType::WraithRegistration as i32,
+            payload: Some(crate::proto::wraith::wraith_message::Payload::WraithRegistration(reg)),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+
+        // Encode and send registration message
+        let data = crate::message::codec::MessageCodec::encode(&reg_msg);
+        let len = data.len() as u32;
+        stream.write_all(&len.to_be_bytes()).await?;
+        stream.write_all(&data).await?;
+        stream.flush().await?;
+
+        debug!("Sent WraithRegistration to peer at {}", addr);
+
+        // Create channels for command communication
+        let (tx, _rx) = mpsc::channel::<crate::proto::wraith::WraithMessage>(100);
+
+        // Create peer session and add to tunnel manager
+        let session = PeerSession::new(
+            wraith_id.clone(),
+            hostname,
+            conn,
+            tx,
+        );
+
+        self.add_session(wraith_id.clone(), session).await;
+
+        info!("Established peer connection: {}", wraith_id);
         Ok(())
     }
 }

@@ -8,7 +8,10 @@ pub struct WraithMessage {
     pub message_id: ::prost::alloc::string::String,
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
-    #[prost(oneof = "wraith_message::Payload", tags = "4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(
+        oneof = "wraith_message::Payload",
+        tags = "4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15"
+    )]
     pub payload: ::core::option::Option<wraith_message::Payload>,
 }
 /// Nested message and enum types in `WraithMessage`.
@@ -32,6 +35,14 @@ pub mod wraith_message {
         RelayList(super::RelayList),
         #[prost(message, tag = "11")]
         RelayListResponse(super::RelayListResponse),
+        #[prost(message, tag = "12")]
+        WraithRegistration(super::WraithRegistration),
+        #[prost(message, tag = "13")]
+        PeerUpdate(super::PeerUpdate),
+        #[prost(message, tag = "14")]
+        PeerList(super::PeerList),
+        #[prost(message, tag = "15")]
+        PeerListResponse(super::PeerListResponse),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -143,6 +154,54 @@ pub struct RelayInfo {
     #[prost(bool, tag = "6")]
     pub active: bool,
 }
+/// Wraith-to-Wraith Registration
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WraithRegistration {
+    #[prost(string, tag = "1")]
+    pub wraith_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub os: ::prost::alloc::string::String,
+    #[prost(int64, tag = "4")]
+    pub connected_at: i64,
+}
+/// Peer list/management
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerInfo {
+    #[prost(string, tag = "1")]
+    pub wraith_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub connected: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerList {}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerListResponse {
+    #[prost(string, tag = "1")]
+    pub wraith_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub peers: ::prost::alloc::vec::Vec<PeerInfo>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerUpdate {
+    #[prost(string, tag = "1")]
+    pub wraith_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    /// "connected" or "disconnected"
+    #[prost(string, tag = "3")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(int64, tag = "4")]
+    pub timestamp: i64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MessageType {
@@ -154,6 +213,10 @@ pub enum MessageType {
     RelayDelete = 5,
     RelayList = 6,
     RelayListResponse = 7,
+    WraithRegistration = 8,
+    PeerUpdate = 9,
+    PeerList = 10,
+    PeerListResponse = 11,
 }
 impl MessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -170,6 +233,10 @@ impl MessageType {
             MessageType::RelayDelete => "RELAY_DELETE",
             MessageType::RelayList => "RELAY_LIST",
             MessageType::RelayListResponse => "RELAY_LIST_RESPONSE",
+            MessageType::WraithRegistration => "WRAITH_REGISTRATION",
+            MessageType::PeerUpdate => "PEER_UPDATE",
+            MessageType::PeerList => "PEER_LIST",
+            MessageType::PeerListResponse => "PEER_LIST_RESPONSE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -183,6 +250,10 @@ impl MessageType {
             "RELAY_DELETE" => Some(Self::RelayDelete),
             "RELAY_LIST" => Some(Self::RelayList),
             "RELAY_LIST_RESPONSE" => Some(Self::RelayListResponse),
+            "WRAITH_REGISTRATION" => Some(Self::WraithRegistration),
+            "PEER_UPDATE" => Some(Self::PeerUpdate),
+            "PEER_LIST" => Some(Self::PeerList),
+            "PEER_LIST_RESPONSE" => Some(Self::PeerListResponse),
             _ => None,
         }
     }

