@@ -3,7 +3,7 @@ pub mod session;
 pub use session::PeerSession;
 
 use anyhow::Result;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -79,7 +79,6 @@ impl TunnelManager {
         sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
     ) -> Result<()> {
         use crate::wraith::tunnel::PeerSession;
-        use futures::io::{AsyncReadExt, AsyncWriteExt};
 
         let mut conn = yamux::Connection::new(stream.compat(), yamux::Config::default(), yamux::Mode::Server);
 

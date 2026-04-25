@@ -53,7 +53,7 @@ impl WraithState {
         }
     }
 
-    pub fn new_with_relay_manager(relay_manager: Arc<Mutex<RelayManager>>) -> Self {
+    pub fn new_with_relay_manager(wraith_id: String, relay_manager: Arc<Mutex<RelayManager>>) -> Self {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -64,7 +64,6 @@ impl WraithState {
 
         let os = std::env::consts::OS.to_string();
         let ip_address = "0.0.0.0".to_string();
-        let wraith_id = uuid::Uuid::new_v4().to_string();
 
         Self {
             relay_manager,

@@ -5,6 +5,7 @@ use crate::wraith::tunnel::TunnelManager;
 use log::{debug, error, info};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct AgentCommands {
     tunnel_manager: Arc<TunnelManager>,
 }

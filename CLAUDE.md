@@ -24,25 +24,34 @@ cd home && ./setup.sh  # Install PyWraith
 
 ## Run Commands
 
-### Rust Agent (C2 Mode)
+### Rust Agent (C2 Mode - Required Arguments)
 ```bash
 # Connect mode (client) - wraith connects TO C2
-cargo run -- --host 127.0.0.1 --port 4444
+cargo run -- --c2-host 127.0.0.1 --c2-port 4444 --wraith-id my-wraith
 
 # Listen mode (server) - wraith listens for C2
-cargo run -- --host 0.0.0.0 --port 4444 --listen
+cargo run -- --c2-host 0.0.0.0 --c2-port 4444 --wraith-id my-wraith --listen
 
 # With logging
-cargo run -- --host 127.0.0.1 --port 4444 --debug --log-file wraith.log
+cargo run -- --c2-host 127.0.0.1 --c2-port 4444 --wraith-id my-wraith --debug --log-file wraith.log
 ```
 
 ### Rust Agent (Agent Mode - Stage 2)
-```bash
-# Agent listen - wraith listens for C2 AND peer wraith connections
-cargo run -- --agent-listen 0.0.0.0:4445
 
-# Agent connect - wraith connects to C2 and optionally peers
-cargo run -- --agent-connect 10.0.0.1:4444
+In agent mode, `--wraith-id` is required, and C2 is optional.
+
+```bash
+# Agent listen for peers only (no C2)
+cargo run -- --wraith-id my-wraith --agent-listen 0.0.0.0:5555
+
+# Agent listen for peers + connect to C2
+cargo run -- --wraith-id my-wraith --c2-host 10.0.0.1 --c2-port 4444 --agent-listen 0.0.0.0:5555
+
+# Agent connect to peer only (no C2)
+cargo run -- --wraith-id my-wraith --agent-connect 10.0.0.2:5555
+
+# Agent connect to peer + connect to C2
+cargo run -- --wraith-id my-wraith --c2-host 10.0.0.1 --c2-port 4444 --agent-connect 10.0.0.2:5555
 ```
 
 ### PyWraith Client
@@ -95,12 +104,29 @@ create_relay -t A B -t C D -u E F -t G H -t I J -u K L 10.0.0.1 443
 
 | Module | Purpose |
 |--------|---------|
-| `src/wraith/wraith.rs` | Main entry point, connection lifecycle, message dispatch loop, agent listener/connect modes |
+| `src/main.rs` | CLI entry point, async main with tokio, mode routing (C2/agent modes) |
+| `src/wraith/wraith.rs` | Core Wraith struct, shared state via Arc<Mutex<WraithState>>, C2 listener/client, agent modes |
 | `src/connection/` | TCP connection handling (client/server modes), YamuxConnection for peer communication |
 | `src/message/codec.rs` | Protobuf message creation and parsing |
 | `src/commands/` | Command handlers - maps action strings to implementations |
+| `src/wraith/dispatcher.rs` | Message dispatcher - routes commands to relay/agent handlers |
 | `src/relay/mod.rs` | Relay implementations (TCP/UDP), `RelayManager` owns active relays; session-based UDP relay with persistent sockets |
 | `src/wraith/tunnel/` | Peer session management via Yamux - `TunnelManager` and `PeerSession` for agent-to-agent communication |
+| `src/wraith/state.rs` | WraithState - shared mutable state (wraith_id, peer_table, relay_manager, etc.) protected by Mutex |
+
+### State Sharing
+
+Wraith uses `Arc<Mutex<WraithState>>` for thread-safe shared state across async tasks:
+- `state()` - returns Arc<Mutex<WraithState>> for accessing shared state
+- `tunnel_manager()` - returns Arc<TunnelManager> for peer session management
+- `dispatcher()` - returns cloned MessageDispatcher for command handling
+
+### Concurrent Operations
+
+Agent modes support concurrent C2 + peer handling:
+- C2 handling runs in the main task (blocking)
+- Peer listener/connector runs in spawned async tasks
+- All share the same WraithState via Arc<Mutex<...>>
 
 ### Protobuf Definition
 `proto/wraith.proto` defines `WraithMessage` with `oneof payload` containing:
@@ -145,7 +171,7 @@ The wraith agent supports these actions via `Command.action`:
 Wraiths can connect to each other forming a chain: `C2 → Wraith A → Wraith B`
 
 ### Network Topology
-- Each wraith maintains one connection to C2
+- Each wraith maintains one connection to C2 (optional in agent mode)
 - Each wraith can maintain zero or more connections to peer wraiths (full mesh capable)
 - Commands include `target_wraith_id` for routing through the chain
 
@@ -181,12 +207,14 @@ cargo test
 ## Key Files
 
 - `proto/wraith.proto` - Protocol buffer message definitions (includes WraithRegistration, PeerUpdate, PeerList for agent network)
-- `src/main.rs` - Rust entry point with clap CLI parsing (includes --agent-listen, --agent-connect)
-- `src/wraith/wraith.rs` - Core Wraith struct and main run loop (includes agent listener/connect modes)
+- `src/main.rs` - Rust entry point with clap CLI parsing (--c2-host, --c2-port, --wraith-id, --agent-listen, --agent-connect)
+- `src/wraith/wraith.rs` - Core Wraith struct, state accessors, C2 listener/client, agent mode handlers
+- `src/wraith/state.rs` - WraithState with wraith_id, peer_table, relay_manager, seen_message_ids
+- `src/wraith/dispatcher.rs` - MessageDispatcher for routing commands to handlers
 - `src/wraith/tunnel/` - Peer session management (TunnelManager, PeerSession)
 - `src/relay/mod.rs` - All relay implementations (TCP/UDP, session-based UDP, relay chains)
-- `src/commands/relay.rs` - Command handler for relay operations
-- `src/commands/agent.rs` - Agent commands (set_id, list_peers)
+- `src/commands/relay.rs` - RelayCommands handler
+- `src/commands/agent.rs` - AgentCommands (set_id, list_peers, wraith_listen, wraith_connect)
 - `home/PyWraith/client.py` - Python client class (includes set_id, list_peers, list_peers_recursive)
 - `home/PyWraith/protocol.py` - Python protobuf framing/encoding
 - `home/PyWraith/cli.py` - Python CLI implementation

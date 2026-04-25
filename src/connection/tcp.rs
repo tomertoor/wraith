@@ -1,5 +1,5 @@
 use crate::connection::connection::Connection;
-use crate::connection::framing::{read_frame_len, FramedWriter};
+use crate::connection::framing::FramedWriter;
 use crate::proto::wraith::WraithMessage;
 use log::{error, info};
 use prost::Message;
@@ -21,6 +21,16 @@ impl TcpConnection {
             port,
             stream: None,
             is_server,
+        }
+    }
+
+    /// Create a TcpConnection from an existing stream
+    pub fn from_stream(stream: TokioTcpStream) -> Self {
+        Self {
+            host: String::new(),
+            port: 0,
+            stream: Some(stream),
+            is_server: false,
         }
     }
 

@@ -43,7 +43,7 @@ mod command_tests {
         use std::sync::{Arc, Mutex};
 
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
-        let state = WraithState::new_with_relay_manager(relay_manager.clone());
+        let state = WraithState::new_with_relay_manager("test-wraith-id".to_string(), relay_manager.clone());
 
         // State should be initialized with the provided relay manager
         assert!(state.relay_manager.lock().is_ok());

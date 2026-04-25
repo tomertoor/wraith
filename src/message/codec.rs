@@ -1,8 +1,8 @@
 use crate::proto::wraith::{
-    Command, CommandResult, Heartbeat, Registration, RelayCreate, RelayDelete,
+    CommandResult, Heartbeat, Registration, RelayCreate, RelayDelete,
     RelayList, RelayListResponse, RelayInfo, WraithMessage, MessageType,
 };
-use crate::relay::{RelayConfig, RelayEndpoint, Transport};
+use crate::relay::{RelayConfig, Transport};
 use chrono::Utc;
 use prost::Message;
 use uuid::Uuid;
