@@ -12,7 +12,7 @@ use yamux::{Config, Connection, Mode, Stream};
 pub struct PeerSession {
     pub wraith_id: String,
     pub hostname: String,
-    pub connection: Arc<tokio::sync::Mutex<Connection<Compat<TcpStream>>>>,
+    pub connection: Arc<tokio::sync::Mutex<yamux::Connection<Compat<TcpStream>>>>,
     pub command_tx: mpsc::Sender<WraithMessage>,
 }
 
@@ -20,13 +20,13 @@ impl PeerSession {
     pub fn new(
         wraith_id: String,
         hostname: String,
-        connection: Connection<Compat<TcpStream>>,
+        connection: Arc<tokio::sync::Mutex<yamux::Connection<Compat<TcpStream>>>>,
         command_tx: mpsc::Sender<WraithMessage>,
     ) -> Self {
         Self {
             wraith_id,
             hostname,
-            connection: Arc::new(tokio::sync::Mutex::new(connection)),
+            connection,
             command_tx,
         }
     }
@@ -40,7 +40,7 @@ impl PeerSession {
     ) -> Result<Self> {
         let config = Config::default();
         let connection = Connection::new(stream.compat(), config, Mode::Server);
-        Ok(Self::new(wraith_id, hostname, connection, command_tx))
+        Ok(Self::new(wraith_id, hostname, Arc::new(tokio::sync::Mutex::new(connection)), command_tx))
     }
 
     /// Read a WraithMessage from a Yamux stream

@@ -3,34 +3,83 @@ pub mod session;
 pub use session::PeerSession;
 
 use anyhow::Result;
+use futures::future::poll_fn;
 use log::{debug, info, warn};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
+type PeerAddCallback = Box<dyn Fn(&str, &str, &tokio::sync::mpsc::Sender<crate::proto::wraith::WraithMessage>) + Send + 'static>;
+type PeerRemoveCallback = Box<dyn Fn(&str) + Send + 'static>;
+
 pub struct TunnelManager {
     sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
+    peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
+    peer_remove_callback: Arc<Mutex<Option<PeerRemoveCallback>>>,
 }
 
 impl TunnelManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            peer_add_callback: Arc::new(Mutex::new(None)),
+            peer_remove_callback: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Register a callback invoked when a peer is added.
+    pub fn set_peer_add_callback<F>(&self, callback: F)
+    where
+        F: Fn(&str, &str, &tokio::sync::mpsc::Sender<crate::proto::wraith::WraithMessage>) + Send + 'static,
+    {
+        let mut cb = self.peer_add_callback.lock().unwrap();
+        *cb = Some(Box::new(callback));
+    }
+
+    /// Register a callback invoked when a peer is removed.
+    pub fn set_peer_remove_callback<F>(&self, callback: F)
+    where
+        F: Fn(&str) + Send + 'static,
+    {
+        let mut cb = self.peer_remove_callback.lock().unwrap();
+        *cb = Some(Box::new(callback));
+    }
+
+    fn notify_peer_added(&self, wraith_id: &str, hostname: &str, sender: &tokio::sync::mpsc::Sender<crate::proto::wraith::WraithMessage>) {
+        let cb = self.peer_add_callback.lock().unwrap();
+        if let Some(ref callback) = *cb {
+            callback(wraith_id, hostname, sender);
+        }
+    }
+
+    fn notify_peer_removed(&self, wraith_id: &str) {
+        let cb = self.peer_remove_callback.lock().unwrap();
+        if let Some(ref callback) = *cb {
+            callback(wraith_id);
         }
     }
 
     pub async fn add_session(&self, wraith_id: String, session: PeerSession) {
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(wraith_id.clone(), session);
+        let hostname = session.hostname.clone();
+        let command_tx = session.command_tx.clone();
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(wraith_id.clone(), session);
+        }
+        self.notify_peer_added(&wraith_id, &hostname, &command_tx);
         info!("Added peer session: {}", wraith_id);
     }
 
     pub async fn remove_session(&self, wraith_id: &str) {
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(wraith_id);
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(wraith_id);
+        }
+        self.notify_peer_removed(wraith_id);
         info!("Removed peer session: {}", wraith_id);
     }
 
@@ -55,14 +104,16 @@ impl TunnelManager {
         let listener = TcpListener::bind(addr).await?;
         info!("Listening for peer connections on {}", addr);
         let sessions = Arc::clone(&self.sessions);
+        let peer_add_callback = Arc::clone(&self.peer_add_callback);
 
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
                     info!("Peer connection from: {}", peer_addr);
                     let sessions = Arc::clone(&sessions);
+                    let peer_add_callback = Arc::clone(&peer_add_callback);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_peer_connection(stream, sessions).await {
+                        if let Err(e) = Self::handle_peer_connection(stream, sessions, peer_add_callback).await {
                             warn!("Peer connection handler error: {}", e);
                         }
                     });
@@ -77,17 +128,37 @@ impl TunnelManager {
     async fn handle_peer_connection(
         stream: TcpStream,
         sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
+        peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
     ) -> Result<()> {
         use crate::wraith::tunnel::PeerSession;
 
-        let mut conn = yamux::Connection::new(stream.compat(), yamux::Config::default(), yamux::Mode::Server);
+        let conn = yamux::Connection::new(stream.compat(), yamux::Config::default(), yamux::Mode::Server);
 
-        // Use next_stream() to get the first stream from the connection
-        let mut stream = match conn.next_stream().await {
-            Ok(Some(s)) => s,
-            Ok(None) => return Ok(()), // No stream available
-            Err(e) => return Err(anyhow::anyhow!("yamux error: {}", e)),
+        // Drive connection in background so frames get written to socket
+        let conn_handle = Arc::new(tokio::sync::Mutex::new(conn));
+        let conn_handle_for_spawn = conn_handle.clone();
+        tokio::spawn(async move {
+            let mut c = conn_handle_for_spawn.lock().await;
+            loop {
+                // poll_next_inbound returns Option<Result<Stream>>
+                match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
+                    Some(Ok(_)) => { /* stream handled elsewhere */ }
+                    Some(Err(e)) => { warn!("Peer connection server error: {}", e); break; }
+                    None => { info!("Peer connection server: no more inbound streams"); break; }
+                }
+            }
+            info!("Peer connection server driver finished");
+        });
+
+        // Use poll_next_inbound to get the first stream from the connection
+        let mut conn_lock = conn_handle.lock().await;
+        let mut stream = match futures::future::poll_fn(|cx| Pin::new(&mut conn_lock).poll_next_inbound(cx)).await {
+            Some(Ok(s)) => { info!("TEST2: got inbound stream"); s }
+            Some(Err(e)) => return Err(anyhow::anyhow!("yamux error: {}", e)),
+            None => { info!("TEST: no stream available"); return Ok(()); }
         };
+        drop(conn_lock);
+        info!("LOLERZ");
 
         // Read WraithRegistration from Stream 0
         if let Ok(Some(msg)) = PeerSession::read_message(&mut stream).await {
@@ -96,10 +167,17 @@ impl TunnelManager {
                 let hostname = reg.hostname.clone();
                 let (tx, _rx) = mpsc::channel(100);
 
-                let session = PeerSession::new(wraith_id.clone(), hostname, conn, tx);
+                let session = PeerSession::new(wraith_id.clone(), hostname.clone(), conn_handle, tx.clone());
 
-                let mut sessions_write = sessions.write().await;
-                sessions_write.insert(wraith_id.clone(), session);
+                {
+                    let mut sessions_write = sessions.write().await;
+                    sessions_write.insert(wraith_id.clone(), session);
+                }
+
+                // Notify observer (e.g., WraithState.peer_table)
+                if let Some(ref cb) = *peer_add_callback.lock().unwrap() {
+                    cb(&wraith_id, &hostname, &tx);
+                }
 
                 info!("Registered peer: {}", wraith_id);
             }
@@ -127,8 +205,28 @@ impl TunnelManager {
         let config = yamux::Config::default();
         let conn = yamux::Connection::new(stream.compat(), config, yamux::Mode::Client);
 
-        // Open stream 0 for registration
-        let mut stream = conn.control().open_stream().await?;
+        // Drive the connection in the background so frames get written to the socket
+        let conn_handle = Arc::new(tokio::sync::Mutex::new(conn));
+        let conn_handle_for_spawn = conn_handle.clone();
+        tokio::spawn(async move {
+            let mut c = conn_handle_for_spawn.lock().await;
+            loop {
+                match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
+                    Some(Ok(_)) => { /* handle incoming */ }
+                    Some(Err(e)) => { warn!("Peer connection client error: {}", e); break; }
+                    None => { info!("Peer connection client: connection closed"); break; }
+                }
+            }
+            info!("Peer connection client driver finished");
+        });
+
+        // Open stream 0 for registration using poll_new_outbound
+        info!("Before Sending Wraith registration");
+        let mut stream = {
+            let mut conn_lock = conn_handle.lock().await;
+            poll_fn(|cx| Pin::new(&mut conn_lock).poll_new_outbound(cx)).await?
+        };
+        info!("Opened outbound stream, sending Wraith registration");
 
         // Send WraithRegistration
         let reg = crate::proto::wraith::WraithRegistration {
@@ -161,7 +259,7 @@ impl TunnelManager {
         let session = PeerSession::new(
             wraith_id.clone(),
             hostname,
-            conn,
+            conn_handle,
             tx,
         );
 

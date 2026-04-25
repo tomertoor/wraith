@@ -49,6 +49,14 @@ impl Wraith {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
         let tunnel_manager = Arc::new(TunnelManager::new());
         let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(wraith_id.clone(), relay_manager.clone())));
+
+        // Register callback to sync TunnelManager sessions → WraithState.peer_table
+        let state_clone = Arc::clone(&state);
+        tunnel_manager.set_peer_add_callback(move |wraith_id, hostname, sender| {
+            let mut s = state_clone.lock().unwrap();
+            s.add_peer(wraith_id.to_string(), hostname.to_string(), sender.clone());
+        });
+
         let relay_commands = RelayCommands::new(relay_manager.clone(), tunnel_manager.clone());
         let agent_commands = AgentCommands::new(tunnel_manager.clone());
 

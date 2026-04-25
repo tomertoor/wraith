@@ -14,7 +14,7 @@ uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 futures = "0.3"
 async-trait = "0.1"
-yamux = "0.10"  # Stage 2
+yamux = "0.13.10"  # Stage 2
 tokio-util = { version = "0.7", features = ["compat"] }  # For yamux compatibility
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
