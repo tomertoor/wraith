@@ -49,7 +49,8 @@ class WraithProtocol:
         command_id: str,
         action: str,
         params: Optional[Dict[str, str]] = None,
-        timeout: int = 30
+        timeout: int = 30,
+        target_wraith_id: str = ""
     ) -> pb.WraithMessage:
         """Create a COMMAND message."""
         cmd = pb.Command(
@@ -62,6 +63,7 @@ class WraithProtocol:
             msg_type=pb.COMMAND,
             message_id=command_id,
             timestamp=int(time.time() * 1000),
+            target_wraith_id=target_wraith_id,
             command=cmd
         )
         return msg
