@@ -1,10 +1,11 @@
 use crate::proto::wraith::{
-    CommandResult, Heartbeat, Registration, RelayCreate, RelayDelete,
+    Command, CommandResult, Heartbeat, Registration, RelayCreate, RelayDelete,
     RelayList, RelayListResponse, RelayInfo, WraithMessage, MessageType,
 };
 use crate::relay::{RelayConfig, Transport};
 use chrono::Utc;
 use prost::Message;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct MessageCodec;
@@ -57,6 +58,37 @@ impl MessageCodec {
         msg.timestamp = Utc::now().timestamp_millis();
         msg.payload = Some(crate::proto::wraith::wraith_message::Payload::Heartbeat(hb));
         msg
+    }
+
+    pub fn create_command(
+        command_id: String,
+        action: String,
+        params: HashMap<String, String>,
+        timeout: i32,
+        target_wraith_id: String,
+    ) -> WraithMessage {
+        let mut cmd = Command::default();
+        cmd.command_id = command_id;
+        cmd.action = action;
+        cmd.params = params;
+        cmd.timeout = timeout;
+
+        let mut msg = WraithMessage::default();
+        msg.msg_type = MessageType::Command as i32;
+        msg.message_id = Uuid::new_v4().to_string();
+        msg.timestamp = Utc::now().timestamp_millis();
+        msg.target_wraith_id = target_wraith_id;
+        msg.payload = Some(crate::proto::wraith::wraith_message::Payload::Command(cmd));
+        msg
+    }
+
+    pub fn create_command_simple(
+        command_id: String,
+        action: String,
+        params: HashMap<String, String>,
+        timeout: i32,
+    ) -> WraithMessage {
+        Self::create_command(command_id, action, params, timeout, String::new())
     }
 
     pub fn create_command_result(
