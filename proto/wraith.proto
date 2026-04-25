@@ -21,6 +21,7 @@ message WraithMessage {
     MessageType msg_type = 1;
     string message_id = 2;
     int64 timestamp = 3;
+    string target_wraith_id = 16;  // routing target for agent chain
     oneof payload {
         Registration registration = 4;
         Heartbeat heartbeat = 5;
