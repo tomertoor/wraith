@@ -14,7 +14,7 @@ impl RelayCommands {
         Self { relay_manager }
     }
 
-    pub fn handle_create_relay(&self, cmd: &ProtoCommand) -> CommandResult {
+    pub fn handle_create_relay(&self, cmd: &ProtoCommand, local_wraith_id: &str) -> CommandResult {
         // Hops come as: hop_0_listen_host, hop_0_listen_port, hop_0_forward_host, hop_0_forward_port, hop_0_protocol, hop_1_...
         // Or legacy single-hop: listen_host, listen_port, forward_host, forward_port, protocol
         let mut hops: Vec<RelayConfig> = Vec::new();
@@ -71,6 +71,21 @@ impl RelayCommands {
                 duration_ms: 0,
                 error: "Invalid relay configuration: no hops provided".to_string(),
             };
+        }
+
+        // Check if this relay should be created on a remote wraith
+        if let Some(target_id) = cmd.params.get("target_wraith_id") {
+            if target_id != local_wraith_id {
+                // Return status indicating this needs to be routed
+                return CommandResult {
+                    command_id: cmd.command_id.clone(),
+                    status: "route_to_peer".to_string(),
+                    output: target_id.clone(),
+                    exit_code: 0,
+                    duration_ms: 0,
+                    error: format!("forward_to_peer:{}", target_id),
+                };
+            }
         }
 
         debug!("create_relay: {} hop(s)", hops.len());
@@ -138,7 +153,7 @@ impl RelayCommands {
 impl Command for RelayCommands {
     fn execute(&self, cmd: &ProtoCommand) -> CommandResult {
         match cmd.action.as_str() {
-            "create_relay" => self.handle_create_relay(cmd),
+            "create_relay" => self.handle_create_relay(cmd, ""),
             "delete_relay" => self.handle_delete_relay(cmd),
             "list_relays" => self.handle_list_relays(cmd),
             _ => CommandResult {

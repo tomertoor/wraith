@@ -38,7 +38,15 @@ impl MessageDispatcher {
         if msg_type == MessageType::Command {
             if let Some(crate::proto::wraith::wraith_message::Payload::Command(cmd)) = &msg.payload {
                 let relay_commands = self.relay_commands.lock().unwrap();
-                let result = relay_commands.execute(cmd);
+                let local_wraith_id = state.lock().unwrap().wraith_id.clone();
+
+                // For create_relay, pass local_wraith_id to check if routing is needed
+                let result = if cmd.action == "create_relay" {
+                    relay_commands.handle_create_relay(cmd, &local_wraith_id)
+                } else {
+                    relay_commands.execute(cmd)
+                };
+
                 state.lock().unwrap().increment_commands();
 
                 return Some(MessageCodec::create_command_result(
