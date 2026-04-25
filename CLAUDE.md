@@ -24,9 +24,9 @@ cd home && ./setup.sh  # Install PyWraith
 
 ## Run Commands
 
-### Rust Agent
+### Rust Agent (C2 Mode)
 ```bash
-# Connect mode (client) - connect TO C2
+# Connect mode (client) - wraith connects TO C2
 cargo run -- --host 127.0.0.1 --port 4444
 
 # Listen mode (server) - wraith listens for C2
@@ -34,6 +34,15 @@ cargo run -- --host 0.0.0.0 --port 4444 --listen
 
 # With logging
 cargo run -- --host 127.0.0.1 --port 4444 --debug --log-file wraith.log
+```
+
+### Rust Agent (Agent Mode - Stage 2)
+```bash
+# Agent listen - wraith listens for C2 AND peer wraith connections
+cargo run -- --agent-listen 0.0.0.0:4445
+
+# Agent connect - wraith connects to C2 and optionally peers
+cargo run -- --agent-connect 10.0.0.1:4444
 ```
 
 ### PyWraith Client
@@ -77,6 +86,7 @@ create_relay -t A B -t C D -u E F -t G H -t I J -u K L 10.0.0.1 443
 │         │                                                       │
 │         ├── commands/ (command handlers)                        │
 │         │     └── relay.rs → relay/mod.rs (all relay impl)     │
+│         ├── tunnel/ (peer session management)                   │
 │         └── wraith/state.rs (shared state with Mutex)           │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -85,18 +95,21 @@ create_relay -t A B -t C D -u E F -t G H -t I J -u K L 10.0.0.1 443
 
 | Module | Purpose |
 |--------|---------|
-| `src/wraith/wraith.rs` | Main entry point, connection lifecycle, message dispatch loop |
-| `src/connection/` | TCP connection handling (client/server modes) |
+| `src/wraith/wraith.rs` | Main entry point, connection lifecycle, message dispatch loop, agent listener/connect modes |
+| `src/connection/` | TCP connection handling (client/server modes), YamuxConnection for peer communication |
 | `src/message/codec.rs` | Protobuf message creation and parsing |
 | `src/commands/` | Command handlers - maps action strings to implementations |
 | `src/relay/mod.rs` | Relay implementations (TCP/UDP), `RelayManager` owns active relays; session-based UDP relay with persistent sockets |
+| `src/wraith/tunnel/` | Peer session management via Yamux - `TunnelManager` and `PeerSession` for agent-to-agent communication |
 
 ### Protobuf Definition
 `proto/wraith.proto` defines `WraithMessage` with `oneof payload` containing:
 - `Registration` - hostname, username, os, ip
 - `Command` / `CommandResult` - request/response for actions
 - `RelayCreate` / `RelayDelete` / `RelayList` / `RelayListResponse` - relay management
-- `RelayHop` - defines a single hop in a relay chain (listen_host, listen_port, forward_host, forward_port, protocol)
+- `WraithRegistration` - peer wraith registration with wraith_id
+- `PeerUpdate` - peer connect/disconnect notifications
+- `PeerList` / `PeerListResponse` - peer discovery commands
 
 ### Message Flow
 1. PyWraith sends `WraithMessage` with `Command` payload
@@ -109,27 +122,54 @@ create_relay -t A B -t C D -u E F -t G H -t I J -u K L 10.0.0.1 443
 
 The wraith agent supports these actions via `Command.action`:
 
-### Single-Hop Relay (Legacy)
+### Relay Commands
 | Action | Params | Description |
 |--------|--------|-------------|
 | `create_relay` | `listen_host`, `listen_port`, `forward_host`, `forward_port`, `protocol` | Create TCP/UDP relay |
 | `delete_relay` | `relay_id` | Delete relay by ID |
 | `list_relays` | (none) | List all active relays |
 
-### Multi-Hop Relay Chain (New)
+### Agent Commands (Stage 2)
 | Action | Params | Description |
 |--------|--------|-------------|
-| `create_relay` | `hop_N_listen_host`, `hop_N_listen_port`, `hop_N_forward_host`, `hop_N_forward_port`, `hop_N_protocol` | Create relay chain with N hops |
-| `delete_relay` | `relay_id` | Delete relay (or chain) by ID |
-| `list_relays` | (none) | List all active relays/relay chains |
+| `set_id` | `wraith_id` | Set wraith's ID at runtime |
+| `list_peers` | (none) | List direct neighbor wraiths |
 
-**Example multi-hop chain:** `hop_0_listen_host=127.0.0.1`, `hop_0_listen_port=6666`, `hop_0_protocol=tcp`, `hop_1_listen_host=127.0.0.1`, `hop_1_listen_port=7777`, `hop_1_protocol=udp` creates a TCP→UDP relay chain.
+### Remote Relay (Stage 2)
+| Action | Params | Description |
+|--------|--------|-------------|
+| `create_relay` | `target_wraith_id`, `listen_host`, `listen_port`, `forward_host`, `forward_port` | Create relay on remote wraith via chain |
+
+## Agent Network (Stage 2)
+
+Wraiths can connect to each other forming a chain: `C2 → Wraith A → Wraith B`
+
+### Network Topology
+- Each wraith maintains one connection to C2
+- Each wraith can maintain zero or more connections to peer wraiths (full mesh capable)
+- Commands include `target_wraith_id` for routing through the chain
+
+### Command Routing
+1. Check local wraith_id - if matches, execute locally
+2. Check peer table - if target is direct peer, forward via Yamux
+3. Otherwise broadcast to all peers (with loop prevention via message_id tracking)
+
+### Yamux Integration
+- Stream 0: Command/control traffic (bidirectional)
+- Stream 1+: Relay data (one stream per active relay)
 
 ## Protobuf Code Generation
 
+### Rust
 `build.rs` compiles `proto/wraith.proto` → `src/proto/wraith.rs` using `prost-build`. Regenerate with:
 ```bash
 cargo build
+```
+
+### Python
+Regenerate Python protobuf:
+```bash
+protoc --python_out=PyWraith/proto_gen -I../proto ../proto/wraith.proto
 ```
 
 ## Testing
@@ -140,11 +180,13 @@ cargo test
 
 ## Key Files
 
-- `proto/wraith.proto` - Protocol buffer message definitions (includes `RelayHop` for multi-hop chains)
-- `src/main.rs` - Rust entry point with clap CLI parsing
-- `src/wraith/wraith.rs` - Core Wraith struct and main run loop
+- `proto/wraith.proto` - Protocol buffer message definitions (includes WraithRegistration, PeerUpdate, PeerList for agent network)
+- `src/main.rs` - Rust entry point with clap CLI parsing (includes --agent-listen, --agent-connect)
+- `src/wraith/wraith.rs` - Core Wraith struct and main run loop (includes agent listener/connect modes)
+- `src/wraith/tunnel/` - Peer session management (TunnelManager, PeerSession)
 - `src/relay/mod.rs` - All relay implementations (TCP/UDP, session-based UDP, relay chains)
-- `src/commands/relay.rs` - Command handler for relay operations (single-hop and chain)
-- `home/PyWraith/client.py` - Python client class (includes `create_relay_chain` method)
-- `home/PyWraith/protocol.py` - Python protobuf framing/encoding (includes `create_relay_chain_command`)
-- `home/PyWraith/cli.py` - Python CLI implementation (supports `-t`/`-u` flag syntax for relay chains)
+- `src/commands/relay.rs` - Command handler for relay operations
+- `src/commands/agent.rs` - Agent commands (set_id, list_peers)
+- `home/PyWraith/client.py` - Python client class (includes set_id, list_peers, list_peers_recursive)
+- `home/PyWraith/protocol.py` - Python protobuf framing/encoding
+- `home/PyWraith/cli.py` - Python CLI implementation
