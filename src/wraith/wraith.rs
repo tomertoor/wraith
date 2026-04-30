@@ -119,7 +119,7 @@ impl Wraith {
                     let msg_type = msg.msg_type;
                     match msg_type {
                         x if x == MessageType::Command as i32 => {
-                            if let Some(response) = self.dispatcher.dispatch(msg, Arc::clone(&self.state)).await {
+                            if let Some(response) = self.dispatcher.route_message(msg, Arc::clone(&self.state)).await {
                                 connection.send_message(&response).await?;
                             }
                         }
