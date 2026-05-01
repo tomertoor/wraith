@@ -34,3 +34,4 @@ docs/superpowers/plans/
 
 # Misc
 *.tmp.worktrees/
+.worktrees/
