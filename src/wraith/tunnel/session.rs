@@ -2,6 +2,7 @@ use crate::message::codec::MessageCodec;
 use crate::proto::wraith::WraithMessage;
 use anyhow::Result;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
+use log::debug;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -63,10 +64,14 @@ impl PeerSession {
     /// Write a WraithMessage to a Yamux stream
     pub async fn write_message(stream: &mut Stream, msg: &WraithMessage) -> Result<()> {
         let data = MessageCodec::encode(msg);
+        debug!("write_message: encoding complete, {} bytes", data.len());
         let len = data.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
+        debug!("write_message: wrote length prefix");
         stream.write_all(&data).await?;
+        debug!("write_message: wrote data payload");
         stream.flush().await?;
+        debug!("write_message: flush complete");
         Ok(())
     }
 

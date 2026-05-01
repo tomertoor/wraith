@@ -4,7 +4,7 @@ use crate::commands::relay::RelayCommands;
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::{MessageType, WraithMessage};
 use crate::wraith::state::WraithState;
-use log::info;
+use log::{debug, info};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -48,6 +48,8 @@ impl MessageDispatcher {
         // If targeted to a direct peer, forward to that peer and wait for response
         {
             let peer = state.lock().unwrap().peer_table.get(&target).cloned();
+            debug!("Peer table keys: {:?}", state.lock().unwrap().peer_table.keys().collect::<Vec<_>>());
+            debug!("Looking for target: {}", target);
             if let Some(peer) = peer {
                 // Create oneshot channel for response
                 let (response_tx, response_rx) = oneshot::channel::<WraithMessage>();
@@ -59,10 +61,14 @@ impl MessageDispatcher {
                 let msg_clone = msg.clone();
 
                 // Send to peer
-                if peer.sender.send(msg_clone).await.is_ok() {
+                debug!("Passing message to direct peer {}", peer.wraith_id);
+                let send_result = peer.sender.try_send(msg_clone);
+                if send_result.is_ok() {
+                    debug!("Message queued for peer {}", peer.wraith_id);
                     // Wait for response from the peer
                     match response_rx.await {
                         Ok(response) => {
+                            debug!("Received answer for peer forwarding from {}.", peer.wraith_id);
                             // Unregister the pending response
                             state.lock().unwrap().take_pending_response(&msg_id);
                             return Some(response);
@@ -75,11 +81,13 @@ impl MessageDispatcher {
                     }
                 } else {
                     // Send failed, remove pending response
+                    info!("Failed to send to peer {}: {:?}", peer.wraith_id, send_result.err());
                     state.lock().unwrap().take_pending_response(&msg_id);
                 }
             }
         }
 
+        debug!("Sending command to all peers");
         // Broadcast to all peers (except already-seen check done in caller)
         let peers: Vec<_> = state.lock().unwrap().peer_table.values().cloned().collect();
         for peer in peers {

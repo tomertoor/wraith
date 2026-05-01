@@ -207,13 +207,25 @@ impl TunnelManager {
                     let stream_arc_for_fwd = Arc::clone(&stream_arc);
                     let wraith_id_for_fwd = wraith_id.clone();
                     tokio::spawn(async move {
+                        debug!("Server forwarder task starting");
                         while let Some(msg) = rx.recv().await {
+                            debug!("TEST! {}", wraith_id_for_fwd);
+                            debug!("Server forwarder: about to acquire lock");
                             let mut stream = stream_arc_for_fwd.lock().await;
-                            if let Err(e) = PeerSession::write_message(&mut stream, &msg).await {
-                                warn!("Failed to forward message to peer: {}", e);
-                                break;
+                            debug!("Server forwarder: lock acquired");
+                            debug!("Server forwarder: writing message via PeerSession::write_message");
+                            match PeerSession::write_message(&mut stream, &msg).await {
+                                Ok(()) => {
+                                    debug!("Server forwarder: write_message succeeded for {}", wraith_id_for_fwd);
+                                }
+                                Err(e) => {
+                                    warn!("Server forwarder: Failed to forward message to peer: {}", e);
+                                    break;
+                                }
                             }
+                            debug!("Server forwarder: loop iteration complete");
                         }
+                        debug!("Server forwarder: rx.recv() returned None, exiting loop");
                         info!("Peer command forwarder task finished for {}", wraith_id_for_fwd);
                     });
 
@@ -224,10 +236,15 @@ impl TunnelManager {
 
         // Message loop: read commands from stream 0 and dispatch with dedup
         loop {
+            debug!("Message loop: about to acquire stream lock for reading");
             let msg = {
                 let mut stream_lock = stream_arc.lock().await;
+                debug!("Message loop: stream lock acquired");
                 match PeerSession::read_message(&mut stream_lock).await {
-                    Ok(Some(msg)) => msg,
+                    Ok(Some(msg)) => {
+                        debug!("Message loop: read_message got a message");
+                        msg
+                    }
                     Ok(None) => {
                         info!("Peer stream ended");
                         break;
@@ -238,6 +255,7 @@ impl TunnelManager {
                     }
                 }
             };
+            debug!("Message loop: about to process message");
 
             // Check if this is a response to a pending forwarded command
             // Extract state early to avoid holding locks across await
@@ -311,10 +329,16 @@ impl TunnelManager {
         tokio::spawn(async move {
             let mut c = conn_handle_for_spawn.lock().await;
             loop {
+                // Need to poll both inbound AND outbound to drive the connection
                 match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
                     Some(Ok(_)) => { /* handle incoming */ }
                     Some(Err(e)) => { warn!("Peer connection client error: {}", e); break; }
                     None => { info!("Peer connection client: connection closed"); break; }
+                }
+                // Also poll for outbound to flush writes
+                match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_new_outbound(cx)).await {
+                    Ok(_stream) => { /* outbound stream ready */ }
+                    Err(e) => { warn!("Peer connection client outbound error: {}", e); break; }
                 }
             }
             info!("Peer connection client driver finished");
@@ -358,6 +382,7 @@ impl TunnelManager {
 
         // Create channels for command communication
         let (tx, mut rx) = mpsc::channel::<crate::proto::wraith::WraithMessage>(100);
+        info!("Client created mpsc channel, tx sender count: {}", tx.max_capacity());
 
         // Create peer session and add to tunnel manager
         let session = PeerSession::new(
@@ -373,13 +398,28 @@ impl TunnelManager {
         let stream_arc_for_fwd = Arc::clone(&stream_arc);
         let wraith_id_for_fwd = wraith_id.clone();
         tokio::spawn(async move {
+            debug!("Client forwarder task started for {}", wraith_id_for_fwd);
             while let Some(msg) = rx.recv().await {
+                debug!("TEST! client forwarder for {}", wraith_id_for_fwd);
+                debug!("Client forwarder: about to acquire lock");
                 let mut stream = stream_arc_for_fwd.lock().await;
-                if let Err(e) = PeerSession::write_message(&mut stream, &msg).await {
-                    warn!("Failed to forward message to peer: {}", e);
-                    break;
+                debug!("Client forwarder: lock acquired");
+                debug!("Client forwarder: encoding message");
+                let data = crate::message::codec::MessageCodec::encode(&msg);
+                debug!("Client forwarder: encoded {} bytes", data.len());
+                debug!("Client forwarder: about to write to stream");
+                match stream.write_all(&data).await {
+                    Ok(()) => debug!("Client forwarder: write_all succeeded"),
+                    Err(e) => { warn!("Client forwarder: write_all failed: {}", e); break; }
                 }
+                debug!("Client forwarder: about to flush");
+                match stream.flush().await {
+                    Ok(()) => debug!("Client forwarder: flush succeeded"),
+                    Err(e) => { warn!("Client forwarder: flush failed: {}", e); break; }
+                }
+                debug!("Client forwarder: write_message succeeded for {}", wraith_id_for_fwd);
             }
+            debug!("Client forwarder: rx.recv() returned None, exiting");
             info!("Peer command forwarder task finished for {}", wraith_id_for_fwd);
         });
 
