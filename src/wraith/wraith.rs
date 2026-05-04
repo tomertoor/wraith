@@ -47,26 +47,23 @@ pub struct Wraith {
 impl Wraith {
     pub fn new(wraith_id: &String) -> Self {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
+        let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(
+            wraith_id.clone(),
+            Arc::clone(&relay_manager),
+        )));
+
+        // Create single TunnelManager
         let tunnel_manager = Arc::new(TunnelManager::new());
-        let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(wraith_id.clone(), relay_manager.clone())));
-
-        // Register callback to sync TunnelManager sessions → WraithState.peer_table
-        let state_clone = Arc::clone(&state);
-        tunnel_manager.set_peer_add_callback(move |wraith_id, hostname, sender| {
-            let mut s = state_clone.lock().unwrap();
-            s.add_peer(wraith_id.to_string(), hostname.to_string(), sender.clone());
-        });
-
-        let relay_commands = RelayCommands::new(relay_manager.clone(), Arc::clone(&tunnel_manager));
-        let agent_commands = AgentCommands::new(Arc::clone(&tunnel_manager));
-
-        // Use with_commands to properly configure the tunnel manager with routing
-        let tunnel_manager = Arc::new(TunnelManager::with_commands(relay_commands, agent_commands));
-
-        // Set state on tunnel_manager for dedup checking
         tunnel_manager.set_state(Arc::clone(&state));
 
-        // Re-register callback since we created a new tunnel_manager
+        // Create commands with reference to tunnel_manager
+        let relay_commands = RelayCommands::new(Arc::clone(&relay_manager), Arc::clone(&tunnel_manager));
+        let agent_commands = AgentCommands::new(Arc::clone(&tunnel_manager));
+
+        // Configure tunnel_manager with commands
+        tunnel_manager.set_commands(relay_commands, agent_commands);
+
+        // Register peer add callback
         let state_clone = Arc::clone(&state);
         tunnel_manager.set_peer_add_callback(move |wraith_id, hostname, sender| {
             let mut s = state_clone.lock().unwrap();

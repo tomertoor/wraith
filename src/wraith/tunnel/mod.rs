@@ -66,6 +66,12 @@ impl TunnelManager {
         *self.state.lock().unwrap() = Some(state);
     }
 
+    /// Set the command handlers for routing messages
+    pub fn set_commands(&self, relay_commands: RelayCommands, agent_commands: AgentCommands) {
+        *self.relay_commands.lock().unwrap() = relay_commands;
+        *self.agent_commands.lock().unwrap() = agent_commands;
+    }
+
     /// Register a callback invoked when a peer is added.
     pub fn set_peer_add_callback<F>(&self, callback: F)
     where
