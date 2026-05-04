@@ -1,5 +1,6 @@
 use crate::connection::connection::Connection;
 use crate::connection::framing::FramedWriter;
+use crate::message::codec::MessageCodec;
 use crate::proto::wraith::WraithMessage;
 use log::{error, info};
 use prost::Message;
@@ -55,20 +56,7 @@ impl TcpConnection {
             Error::new(ErrorKind::NotConnected, "not connected")
         })?;
 
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await?;
-
-        let len = u32::from_be_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) as usize;
-
-        if len > 10 * 1024 * 1024 {
-            return Err(Error::new(ErrorKind::InvalidData, "message too large"));
-        }
-
-        let mut data = vec![0u8; len];
-        stream.read_exact(&mut data).await?;
-
-        let msg = WraithMessage::decode(data.as_slice())?;
-        Ok(msg)
+        MessageCodec::read_framed_message(stream).await
     }
 }
 
@@ -137,18 +125,6 @@ impl Connection for TcpConnection {
             Error::new(ErrorKind::NotConnected, "not connected")
         })?;
 
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await?;
-
-        let len = u32::from_be_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) as usize;
-
-        if len > 10 * 1024 * 1024 {
-            return Err(Error::new(ErrorKind::InvalidData, "message too large"));
-        }
-
-        let mut data = vec![0u8; len];
-        stream.read_exact(&mut data).await?;
-
-        WraithMessage::decode(data.as_slice()).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+        MessageCodec::read_framed_message(stream).await
     }
 }
