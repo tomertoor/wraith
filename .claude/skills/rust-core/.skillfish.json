@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "rust-core",
+  "owner": "udapy",
+  "repo": "rust-agentic-skills",
+  "path": "skills/rust-core",
+  "branch": "main",
+  "sha": "15b31375f8439dcb4cdb882ec84ff50cc5fcaa10",
+  "source": "manual"
+}

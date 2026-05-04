@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "coding-guidelines",
+  "owner": "lywa1998",
+  "repo": "self-host-claude-marketplace",
+  "path": "plugins/rust/skills/coding-guidelines",
+  "branch": "main",
+  "sha": "e60f196078b13eca777c7913d02f751e3edbf32f",
+  "source": "manual"
+}
