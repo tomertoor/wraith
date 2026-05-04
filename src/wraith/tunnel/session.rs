@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use yamux::{Config, Connection, Mode, Stream};
+use yamux::{Config, Connection, Mode};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
