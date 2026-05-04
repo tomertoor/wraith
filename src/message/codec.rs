@@ -6,6 +6,8 @@ use crate::relay::{RelayConfig, Transport};
 use chrono::Utc;
 use prost::Message;
 use std::collections::HashMap;
+use std::io::{Error, ErrorKind};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use uuid::Uuid;
 
 pub struct MessageCodec;
@@ -17,6 +19,28 @@ impl MessageCodec {
 
     pub fn decode(data: &[u8]) -> Result<WraithMessage, prost::DecodeError> {
         WraithMessage::decode(data)
+    }
+
+    /// Read a length-prefixed WraithMessage from a stream.
+    /// Format: [4 bytes: length as big-endian u32][N bytes: protobuf]
+    pub async fn read_framed_message<R>(stream: &mut R) -> Result<WraithMessage, Error>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        if len > 10 * 1024 * 1024 {
+            return Err(Error::new(ErrorKind::InvalidData, "message too large"));
+        }
+
+        let mut data = vec![0u8; len];
+        stream.read_exact(&mut data).await?;
+
+        WraithMessage::decode(data.as_slice())
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))
     }
 
     pub fn create_message(msg_type: MessageType) -> WraithMessage {
