@@ -5,7 +5,7 @@ use crate::proto::wraith::WraithMessage;
 use log::{error, info};
 use prost::Message;
 use std::io::{Error, ErrorKind, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream as TokioTcpStream;
 
 pub struct TcpConnection {

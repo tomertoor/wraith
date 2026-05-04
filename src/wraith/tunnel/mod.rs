@@ -12,7 +12,6 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock, oneshot};
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
-use yamux::{Config, Connection, Mode, Stream};
 
 use crate::commands::relay::RelayCommands;
 use crate::commands::agent::AgentCommands;
@@ -245,8 +244,8 @@ impl TunnelManager {
         stream: TcpStream,
         sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
         peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
-        relay_commands: Arc<Mutex<RelayCommands>>,
-        agent_commands: Arc<Mutex<AgentCommands>>,
+        _relay_commands: Arc<Mutex<RelayCommands>>,
+        _agent_commands: Arc<Mutex<AgentCommands>>,
         state: Arc<Mutex<Option<Arc<Mutex<crate::wraith::state::WraithState>>>>>,
         tunnel_manager: Arc<TunnelManager>,
     ) -> Result<()> {
@@ -358,7 +357,7 @@ impl TunnelManager {
                         let already_seen = {
                             let state_guard = state.lock().unwrap();
                             if let Some(ref s) = *state_guard {
-                                let mut s = s.lock().unwrap();
+                                let s = s.lock().unwrap();
 
                                 if s.has_seen_message(&msg_id) {
                                     true
@@ -531,7 +530,7 @@ impl TunnelManager {
 
         // Split stream into read/write halves - writer task takes write_half
         let stream_compat = stream.compat();
-        let (read_half, mut write_half) = tokio::io::split(stream_compat);
+        let (_read_half, mut write_half) = tokio::io::split(stream_compat);
         let (tx, mut rx) = mpsc::channel::<crate::proto::wraith::WraithMessage>(100);
 
         let session = PeerSession::new(
@@ -604,7 +603,7 @@ impl TunnelManager {
                 let already_seen = {
                     let state_guard = state.lock().unwrap();
                     if let Some(ref s) = *state_guard {
-                        let mut s = s.lock().unwrap();
+                        let s = s.lock().unwrap();
 
                         if s.has_seen_message(&msg_id) {
                             true
