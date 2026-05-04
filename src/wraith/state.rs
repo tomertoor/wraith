@@ -11,6 +11,12 @@ pub struct PeerConnection {
     pub sender: mpsc::Sender<crate::proto::wraith::WraithMessage>,
 }
 
+/// Result of checking a message for deduplication.
+pub struct DedupResult {
+    pub already_seen: bool,
+    pub pending_tx: Option<oneshot::Sender<crate::proto::wraith::WraithMessage>>,
+}
+
 pub struct WraithState {
     pub relay_manager: Arc<Mutex<RelayManager>>,
     pub wraith_id: String,
@@ -127,6 +133,47 @@ impl WraithState {
     /// Check if there's a pending response for a message
     pub fn take_pending_response(&self, message_id: &str) -> Option<oneshot::Sender<crate::proto::wraith::WraithMessage>> {
         self.pending_responses.lock().unwrap().remove(message_id)
+    }
+
+    /// Check if a message has been seen, and if so return the pending response sender.
+    /// Marks the message as seen if this is the first time.
+    pub fn check_and_mark_seen(&self, msg_id: &str) -> DedupResult {
+        let pending_tx = self
+            .pending_responses
+            .lock()
+            .unwrap()
+            .remove(msg_id);
+
+        let already_seen = if self.seen_message_ids.lock().unwrap().contains(msg_id) {
+            true
+        } else {
+            self.seen_message_ids.lock().unwrap().insert(msg_id.to_string());
+            false
+        };
+
+        DedupResult {
+            already_seen,
+            pending_tx,
+        }
+    }
+
+    /// Add a peer connection to the peer table.
+    pub fn add_peer_to_state(
+        &mut self,
+        wraith_id: String,
+        hostname: String,
+        sender: mpsc::Sender<crate::proto::wraith::WraithMessage>,
+    ) {
+        let connected_at = chrono::Utc::now().timestamp_millis();
+        self.peer_table.insert(
+            wraith_id.clone(),
+            PeerConnection {
+                wraith_id,
+                hostname,
+                connected_at,
+                sender,
+            },
+        );
     }
 }
 
