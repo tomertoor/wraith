@@ -1,6 +1,5 @@
 use crate::commands::agent::AgentCommands;
 use crate::commands::relay::RelayCommands;
-use crate::connection::Connection;
 use crate::connection::tcp::TcpConnection;
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::MessageType;

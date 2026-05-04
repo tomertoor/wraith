@@ -1,8 +1,6 @@
-use crate::connection::connection::Connection;
 use crate::connection::framing::FramedWriter;
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::WraithMessage;
-use log::{error, info};
 use prost::Message;
 use std::io::{Error, ErrorKind, Result};
 use tokio::io::AsyncWriteExt;
@@ -58,73 +56,48 @@ impl TcpConnection {
 
         MessageCodec::read_framed_message(stream).await
     }
-}
 
-impl Connection for TcpConnection {
-    fn init(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn connect(&mut self) -> Result<()> {
+    pub async fn connect(&mut self) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
-        info!("Connecting to {}", addr);
+        log::info!("Connecting to {}", addr);
 
         match TokioTcpStream::connect(&addr).await {
             Ok(stream) => {
                 self.stream = Some(stream);
-                info!("Connected to {}", addr);
+                log::info!("Connected to {}", addr);
                 Ok(())
             }
             Err(e) => {
-                error!("Failed to connect to {}: {}", addr, e);
+                log::error!("Failed to connect to {}: {}", addr, e);
                 Err(e.into())
             }
         }
     }
 
-    async fn listen(&mut self) -> Result<()> {
+    pub async fn listen(&mut self) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
-        info!("Listening on {}", addr);
+        log::info!("Listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         match listener.accept().await {
             Ok((stream, _)) => {
                 self.stream = Some(stream);
-                info!("Accepted connection");
+                log::info!("Accepted connection");
                 Ok(())
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         if let Some(stream) = self.stream.take() {
             drop(stream);
         }
         Ok(())
     }
 
-    fn is_connected(&self) -> bool {
+    pub fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
-
-    async fn send_message(&mut self, msg: &WraithMessage) -> std::io::Result<()> {
-        let stream = self.stream.as_mut().ok_or_else(|| {
-            Error::new(ErrorKind::NotConnected, "not connected")
-        })?;
-
-        let data = msg.encode_to_vec();
-        let framed = FramedWriter::write_frame(&data).map_err(|e| Error::new(ErrorKind::Other, e))?;
-
-        stream.write_all(&framed).await?;
-        Ok(())
-    }
-
-    async fn read_message(&mut self) -> std::io::Result<WraithMessage> {
-        let stream = self.stream.as_mut().ok_or_else(|| {
-            Error::new(ErrorKind::NotConnected, "not connected")
-        })?;
-
-        MessageCodec::read_framed_message(stream).await
-    }
 }
+
