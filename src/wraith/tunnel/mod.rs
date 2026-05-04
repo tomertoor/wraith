@@ -23,6 +23,35 @@ use crate::proto::wraith::{MessageType, WraithMessage};
 type PeerAddCallback = Box<dyn Fn(&str, &str, &tokio::sync::mpsc::Sender<crate::proto::wraith::WraithMessage>) + Send + 'static>;
 type PeerRemoveCallback = Box<dyn Fn(&str) + Send + 'static>;
 
+/// Spawn a background task to drive a yamux Connection.
+/// Returns a handle (Arc<Mutex<Connection>>) for opening streams.
+pub fn spawn_yamux_driver(
+    conn: yamux::Connection<Compat<TcpStream>>,
+) -> Arc<tokio::sync::Mutex<yamux::Connection<Compat<TcpStream>>>> {
+    let conn_handle = Arc::new(tokio::sync::Mutex::new(conn));
+    let conn_handle_for_spawn = Arc::clone(&conn_handle);
+
+    tokio::spawn(async move {
+        let mut c = conn_handle_for_spawn.lock().await;
+        loop {
+            match poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
+                Some(Ok(_)) => { /* stream handled elsewhere */ }
+                Some(Err(e)) => {
+                    warn!("Yamux connection error: {}", e);
+                    break;
+                }
+                None => {
+                    info!("Yamux connection closed");
+                    break;
+                }
+            }
+        }
+        info!("Yamux driver finished");
+    });
+
+    conn_handle
+}
+
 pub struct TunnelManager {
     sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
     peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
@@ -185,21 +214,7 @@ impl TunnelManager {
         use crate::wraith::tunnel::PeerSession;
 
         let conn = yamux::Connection::new(stream.compat(), yamux::Config::default(), yamux::Mode::Server);
-
-        // Drive connection in background so frames get written to socket
-        let conn_handle = Arc::new(tokio::sync::Mutex::new(conn));
-        let conn_handle_for_spawn = conn_handle.clone();
-        tokio::spawn(async move {
-            let mut c = conn_handle_for_spawn.lock().await;
-            loop {
-                match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
-                    Some(Ok(_)) => { /* stream handled elsewhere */ }
-                    Some(Err(e)) => { warn!("Peer connection server error: {}", e); break; }
-                    None => { info!("Peer connection server: no more inbound streams"); break; }
-                }
-            }
-            info!("Peer connection server driver finished");
-        });
+        let conn_handle = spawn_yamux_driver(conn);
 
         // Use poll_next_inbound to get the first stream from the connection
         let mut conn_lock = conn_handle.lock().await;
@@ -471,24 +486,7 @@ impl TunnelManager {
 
         let config = yamux::Config::default();
         let conn = yamux::Connection::new(stream.compat(), config, yamux::Mode::Client);
-
-        let conn_handle = Arc::new(tokio::sync::Mutex::new(conn));
-        let conn_handle_for_spawn = conn_handle.clone();
-        tokio::spawn(async move {
-            let mut c = conn_handle_for_spawn.lock().await;
-            loop {
-                match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
-                    Some(Ok(_)) => { /* handle incoming */ }
-                    Some(Err(e)) => { warn!("Peer connection client error: {}", e); break; }
-                    None => { info!("Peer connection client: connection closed"); break; }
-                }
-                match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_new_outbound(cx)).await {
-                    Ok(_stream) => { /* outbound stream ready */ }
-                    Err(e) => { warn!("Peer connection client outbound error: {}", e); break; }
-                }
-            }
-            info!("Peer connection client driver finished");
-        });
+        let conn_handle = spawn_yamux_driver(conn);
 
         let mut stream = {
             let mut conn_lock = conn_handle.lock().await;
