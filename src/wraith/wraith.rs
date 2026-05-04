@@ -5,7 +5,6 @@ use crate::connection::tcp::TcpConnection;
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::MessageType;
 use crate::relay::RelayManager;
-use crate::wraith::dispatcher::MessageDispatcher;
 use crate::wraith::state::WraithState;
 use crate::wraith::tunnel::TunnelManager;
 use log::{error, info};
@@ -36,7 +35,6 @@ impl std::error::Error for WraithError {}
 pub struct Wraith {
     connection: Option<TcpConnection>,
     state: Arc<Mutex<WraithState>>,
-    dispatcher: MessageDispatcher,
     tunnel_manager: Arc<TunnelManager>,
     agent_mode: bool,
     peer_listen_addr: Option<String>,
@@ -69,15 +67,9 @@ impl Wraith {
             s.add_peer(wraith_id.to_string(), hostname.to_string(), sender.clone());
         });
 
-        let dispatcher = MessageDispatcher::new(
-            RelayCommands::new(relay_manager, Arc::clone(&tunnel_manager)),
-            AgentCommands::new(Arc::clone(&tunnel_manager)),
-        );
-
         Self {
             connection: None,
             state,
-            dispatcher,
             tunnel_manager,
             agent_mode: false,
             peer_listen_addr: None,
@@ -277,7 +269,6 @@ impl Clone for Wraith {
         Self {
             connection: None,
             state: Arc::clone(&self.state),
-            dispatcher: self.dispatcher.clone(),
             tunnel_manager: Arc::clone(&self.tunnel_manager),
             agent_mode: self.agent_mode,
             peer_listen_addr: self.peer_listen_addr.clone(),
