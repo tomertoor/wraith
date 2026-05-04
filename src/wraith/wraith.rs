@@ -1,10 +1,9 @@
 use crate::commands::agent::AgentCommands;
-use crate::commands::command::Command;
 use crate::commands::relay::RelayCommands;
 use crate::connection::Connection;
 use crate::connection::tcp::TcpConnection;
 use crate::message::codec::MessageCodec;
-use crate::proto::wraith::{MessageType, WraithMessage};
+use crate::proto::wraith::MessageType;
 use crate::relay::RelayManager;
 use crate::wraith::dispatcher::MessageDispatcher;
 use crate::wraith::state::WraithState;
@@ -228,46 +227,6 @@ impl Wraith {
 
         state.lock().unwrap().set_connected(false);
         Ok(())
-    }
-
-    /// Dispatch a command message
-    async fn dispatch_command(
-        msg: WraithMessage,
-        state: Arc<Mutex<WraithState>>,
-        relay_commands: Arc<Mutex<RelayCommands>>,
-        agent_commands: Arc<Mutex<AgentCommands>>,
-    ) -> Option<WraithMessage> {
-        if let Some(crate::proto::wraith::wraith_message::Payload::Command(cmd)) = &msg.payload {
-            let result = if cmd.action == "create_relay" {
-                let relay_cmds = relay_commands.lock().unwrap();
-                let local_wraith_id = state.lock().unwrap().wraith_id.clone();
-                relay_cmds.handle_create_relay(cmd, &local_wraith_id)
-            } else if cmd.action == "delete_relay" || cmd.action == "list_relays" {
-                relay_commands.lock().unwrap().execute(cmd)
-            } else if cmd.action == "set_id" {
-                agent_commands.lock().unwrap().handle_set_id(cmd, &mut state.lock().unwrap())
-            } else if cmd.action == "list_peers" {
-                agent_commands.lock().unwrap().handle_list_peers(cmd, &state.lock().unwrap())
-            } else if cmd.action == "wraith_listen" {
-                agent_commands.lock().unwrap().handle_wraith_listen(cmd)
-            } else if cmd.action == "wraith_connect" {
-                agent_commands.lock().unwrap().handle_wraith_connect(cmd, &state.lock().unwrap())
-            } else {
-                return None;
-            };
-
-            state.lock().unwrap().increment_commands();
-
-            return Some(MessageCodec::create_command_result(
-                result.command_id,
-                result.status,
-                result.output,
-                result.exit_code,
-                result.duration_ms,
-                result.error,
-            ));
-        }
-        None
     }
 
     /// Agent connect mode: connect to C2 with automatic reconnection
