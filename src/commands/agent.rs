@@ -7,12 +7,16 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AgentCommands {
-    tunnel_manager: Arc<TunnelManager>,
+    tunnel_manager: Option<Arc<TunnelManager>>,
 }
 
 impl AgentCommands {
     pub fn new(tunnel_manager: Arc<TunnelManager>) -> Self {
-        Self { tunnel_manager }
+        Self { tunnel_manager: Some(tunnel_manager) }
+    }
+
+    pub fn new_without_tunnel() -> Self {
+        Self { tunnel_manager: None }
     }
 
     pub fn handle_set_id(&self, cmd: &ProtoCommand, state: &mut WraithState) -> CommandResult {
@@ -72,7 +76,7 @@ impl AgentCommands {
         let port: u16 = cmd.params.get("port").and_then(|s| s.parse().ok()).unwrap_or(4445);
         debug!("wraith_listen: starting peer listener on port {}", port);
 
-        let tunnel_manager = self.tunnel_manager.clone();
+        let tunnel_manager = self.tunnel_manager.clone().unwrap();
         tokio::spawn(async move {
             if let Err(e) = tunnel_manager.start_peer_listener(&format!("0.0.0.0:{}", port)).await {
                 error!("Peer listener error: {}", e);
@@ -107,14 +111,14 @@ impl AgentCommands {
         let addr = format!("{}:{}", host, port);
         debug!("wraith_connect: connecting to peer at {}", addr);
 
-        let tunnel_manager = self.tunnel_manager.clone();
+        let tunnel_manager = self.tunnel_manager.clone().unwrap();
         let wraith_id = state.wraith_id.clone();
         let hostname = state.hostname.clone();
         let os = state.os.clone();
 
         // Spawn async task to establish peer connection via TunnelManager
         tokio::spawn(async move {
-            if let Err(e) = tunnel_manager.connect_to_peer(addr, wraith_id, hostname, os).await {
+            if let Err(e) = Arc::clone(&tunnel_manager).connect_to_peer(addr, wraith_id, hostname, os).await {
                 log::error!("Failed to connect to peer: {}", e);
             }
         });

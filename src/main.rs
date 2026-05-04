@@ -147,7 +147,7 @@ async fn main() {
         // Spawn peer connection in background with retry
         tokio::spawn(async move {
             loop {
-                match tm.connect_to_peer(peer_addr_clone.clone(), wraith_id.clone(), hostname.clone(), os.clone()).await {
+                match Arc::clone(&tm).connect_to_peer(peer_addr_clone.clone(), wraith_id.clone(), hostname.clone(), os.clone()).await {
                     Ok(_) => {
                         info!("Peer connection established");
                         break;

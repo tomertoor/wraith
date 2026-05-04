@@ -9,12 +9,18 @@ use std::sync::Mutex;
 #[derive(Clone)]
 pub struct RelayCommands {
     relay_manager: Arc<Mutex<RelayManager>>,
-    tunnel_manager: Arc<TunnelManager>,
+    #[allow(dead_code)]
+    tunnel_manager: Option<Arc<TunnelManager>>,
 }
 
 impl RelayCommands {
     pub fn new(relay_manager: Arc<Mutex<RelayManager>>, tunnel_manager: Arc<TunnelManager>) -> Self {
-        Self { relay_manager, tunnel_manager }
+        Self { relay_manager, tunnel_manager: Some(tunnel_manager) }
+    }
+
+    /// Creates a RelayCommands without a tunnel_manager reference
+    pub fn new_without_tunnel(relay_manager: Arc<Mutex<RelayManager>>) -> Self {
+        Self { relay_manager, tunnel_manager: None }
     }
 
     pub fn handle_create_relay(&self, cmd: &ProtoCommand, local_wraith_id: &str) -> CommandResult {

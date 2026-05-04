@@ -10,8 +10,15 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, RwLock};
-use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio::sync::{mpsc, RwLock, oneshot};
+use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+use yamux::{Config, Connection, Mode, Stream};
+
+use crate::commands::relay::RelayCommands;
+use crate::commands::agent::AgentCommands;
+use crate::commands::command::Command;
+use crate::message::codec::MessageCodec;
+use crate::proto::wraith::{MessageType, WraithMessage};
 
 type PeerAddCallback = Box<dyn Fn(&str, &str, &tokio::sync::mpsc::Sender<crate::proto::wraith::WraithMessage>) + Send + 'static>;
 type PeerRemoveCallback = Box<dyn Fn(&str) + Send + 'static>;
@@ -20,24 +27,38 @@ pub struct TunnelManager {
     sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
     peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
     peer_remove_callback: Arc<Mutex<Option<PeerRemoveCallback>>>,
-    dispatcher: Arc<Mutex<Option<crate::wraith::dispatcher::MessageDispatcher>>>,
+    relay_commands: Arc<Mutex<RelayCommands>>,
+    agent_commands: Arc<Mutex<AgentCommands>>,
     state: Arc<Mutex<Option<Arc<Mutex<crate::wraith::state::WraithState>>>>>,
 }
 
 impl TunnelManager {
+    /// Creates a TunnelManager for basic session management
+    /// Command handlers are NOT stored in TunnelManager - use with_commands() to add them
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             peer_add_callback: Arc::new(Mutex::new(None)),
             peer_remove_callback: Arc::new(Mutex::new(None)),
-            dispatcher: Arc::new(Mutex::new(None)),
+            relay_commands: Arc::new(Mutex::new(RelayCommands::new_without_tunnel(
+                Arc::new(Mutex::new(crate::relay::RelayManager::new())),
+            ))),
+            agent_commands: Arc::new(Mutex::new(AgentCommands::new_without_tunnel())),
             state: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Set the dispatcher for routing peer messages
-    pub fn set_dispatcher(&self, dispatcher: crate::wraith::dispatcher::MessageDispatcher) {
-        *self.dispatcher.lock().unwrap() = Some(dispatcher);
+    /// Create TunnelManager with command handlers for routing messages
+    /// This should be used instead of new() when proper routing is needed
+    pub fn with_commands(relay_commands: RelayCommands, agent_commands: AgentCommands) -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            peer_add_callback: Arc::new(Mutex::new(None)),
+            peer_remove_callback: Arc::new(Mutex::new(None)),
+            relay_commands: Arc::new(Mutex::new(relay_commands)),
+            agent_commands: Arc::new(Mutex::new(agent_commands)),
+            state: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Set the state for dedup checking
@@ -114,12 +135,13 @@ impl TunnelManager {
         sessions.keys().cloned().collect()
     }
 
-    pub async fn start_peer_listener(&self, addr: &str) -> Result<()> {
+    pub async fn start_peer_listener(self: Arc<Self>, addr: &str) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
         info!("Listening for peer connections on {}", addr);
         let sessions = Arc::clone(&self.sessions);
         let peer_add_callback = Arc::clone(&self.peer_add_callback);
-        let dispatcher = Arc::clone(&self.dispatcher);
+        let relay_commands = Arc::clone(&self.relay_commands);
+        let agent_commands = Arc::clone(&self.agent_commands);
         let state = Arc::clone(&self.state);
 
         loop {
@@ -128,10 +150,12 @@ impl TunnelManager {
                     info!("Peer connection from: {}", peer_addr);
                     let sessions = Arc::clone(&sessions);
                     let peer_add_callback = Arc::clone(&peer_add_callback);
-                    let dispatcher = Arc::clone(&dispatcher);
+                    let relay_commands = Arc::clone(&relay_commands);
+                    let agent_commands = Arc::clone(&agent_commands);
                     let state = Arc::clone(&state);
+                    let this = Arc::clone(&self);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_peer_connection(stream, sessions, peer_add_callback, dispatcher, state).await {
+                        if let Err(e) = Self::handle_peer_connection(stream, sessions, peer_add_callback, relay_commands, agent_commands, state, this).await {
                             warn!("Peer connection handler error: {}", e);
                         }
                     });
@@ -147,8 +171,10 @@ impl TunnelManager {
         stream: TcpStream,
         sessions: Arc<RwLock<HashMap<String, PeerSession>>>,
         peer_add_callback: Arc<Mutex<Option<PeerAddCallback>>>,
-        dispatcher: Arc<Mutex<Option<crate::wraith::dispatcher::MessageDispatcher>>>,
+        relay_commands: Arc<Mutex<RelayCommands>>,
+        agent_commands: Arc<Mutex<AgentCommands>>,
         state: Arc<Mutex<Option<Arc<Mutex<crate::wraith::state::WraithState>>>>>,
+        tunnel_manager: Arc<TunnelManager>,
     ) -> Result<()> {
         use crate::wraith::tunnel::PeerSession;
 
@@ -160,7 +186,6 @@ impl TunnelManager {
         tokio::spawn(async move {
             let mut c = conn_handle_for_spawn.lock().await;
             loop {
-                // poll_next_inbound returns Option<Result<Stream>>
                 match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
                     Some(Ok(_)) => { /* stream handled elsewhere */ }
                     Some(Err(e)) => { warn!("Peer connection server error: {}", e); break; }
@@ -172,131 +197,142 @@ impl TunnelManager {
 
         // Use poll_next_inbound to get the first stream from the connection
         let mut conn_lock = conn_handle.lock().await;
-        let mut stream = match futures::future::poll_fn(|cx| Pin::new(&mut conn_lock).poll_next_inbound(cx)).await {
-            Some(Ok(s)) => { info!("TEST2: got inbound stream"); s }
+        let yamux_stream = match futures::future::poll_fn(|cx| Pin::new(&mut conn_lock).poll_next_inbound(cx)).await {
+            Some(Ok(s)) => s,
             Some(Err(e)) => return Err(anyhow::anyhow!("yamux error: {}", e)),
-            None => { info!("TEST: no stream available"); return Ok(()); }
+            None => return Ok(()),
         };
         drop(conn_lock);
 
-        // Wrap stream in Arc<Mutex> so both message loop and forwarder can access it
-        let stream_arc = Arc::new(tokio::sync::Mutex::new(stream));
-
         // Read WraithRegistration from Stream 0
         {
-            let mut stream_lock = stream_arc.lock().await;
-            if let Ok(Some(msg)) = PeerSession::read_message(&mut stream_lock).await {
+            let stream_compat = yamux_stream.compat();
+            let (mut read_half, mut write_half) = tokio::io::split(stream_compat);
+
+            // --- Read initial registration ---
+            let msg = PeerSession::read_message(&mut read_half).await;
+
+            if let Ok(Some(msg)) = msg {
                 if let Some(crate::proto::wraith::wraith_message::Payload::WraithRegistration(reg)) = msg.payload {
                     let wraith_id = reg.wraith_id.clone();
                     let hostname = reg.hostname.clone();
+
                     let (tx, mut rx) = mpsc::channel::<crate::proto::wraith::WraithMessage>(100);
 
-                    let session = PeerSession::new(wraith_id.clone(), hostname.clone(), conn_handle, tx.clone());
+                    let session = PeerSession::new(
+                        wraith_id.clone(),
+                        hostname.clone(),
+                        conn_handle.clone(),
+                        tx.clone(),
+                    );
 
                     {
                         let mut sessions_write = sessions.write().await;
                         sessions_write.insert(wraith_id.clone(), session);
                     }
 
-                    // Notify observer (e.g., WraithState.peer_table)
                     if let Some(ref cb) = *peer_add_callback.lock().unwrap() {
                         cb(&wraith_id, &hostname, &tx);
                     }
 
-                    // Spawn task to forward messages from channel to peer via Yamux stream 0
-                    let stream_arc_for_fwd = Arc::clone(&stream_arc);
+                    // --- Writer task (OWNS write_half) ---
                     let wraith_id_for_fwd = wraith_id.clone();
+
                     tokio::spawn(async move {
-                        debug!("Server forwarder task starting");
                         while let Some(msg) = rx.recv().await {
-                            debug!("TEST! {}", wraith_id_for_fwd);
-                            debug!("Server forwarder: about to acquire lock");
-                            let mut stream = stream_arc_for_fwd.lock().await;
-                            debug!("Server forwarder: lock acquired");
-                            debug!("Server forwarder: writing message via PeerSession::write_message");
-                            match PeerSession::write_message(&mut stream, &msg).await {
-                                Ok(()) => {
-                                    debug!("Server forwarder: write_message succeeded for {}", wraith_id_for_fwd);
-                                }
-                                Err(e) => {
-                                    warn!("Server forwarder: Failed to forward message to peer: {}", e);
-                                    break;
-                                }
+                            if let Err(e) = PeerSession::write_message(&mut write_half, &msg).await {
+                                warn!("Failed to forward message: {}", e);
+                                break;
                             }
-                            debug!("Server forwarder: loop iteration complete");
                         }
-                        debug!("Server forwarder: rx.recv() returned None, exiting loop");
-                        info!("Peer command forwarder task finished for {}", wraith_id_for_fwd);
+
+                        info!("Writer task finished for {}", wraith_id_for_fwd);
                     });
 
                     info!("Registered peer: {}", wraith_id);
-                }
-            }
-        }
 
-        // Message loop: read commands from stream 0 and dispatch with dedup
-        loop {
-            debug!("Message loop: about to acquire stream lock for reading");
-            let msg = {
-                let mut stream_lock = stream_arc.lock().await;
-                debug!("Message loop: stream lock acquired");
-                match PeerSession::read_message(&mut stream_lock).await {
-                    Ok(Some(msg)) => {
-                        debug!("Message loop: read_message got a message");
-                        msg
-                    }
-                    Ok(None) => {
-                        info!("Peer stream ended");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("Error reading from peer stream: {}", e);
-                        break;
-                    }
-                }
-            };
-            debug!("Message loop: about to process message");
+                    // Re-open the stream for the message loop
+                    // Get a new inbound stream from the same connection
+                    let conn_handle2 = conn_handle.clone();
+                    let mut conn_lock2 = conn_handle2.lock().await;
+                    let stream_for_loop = match futures::future::poll_fn(|cx| Pin::new(&mut conn_lock2).poll_next_inbound(cx)).await {
+                        Some(Ok(s)) => s,
+                        Some(Err(e)) => return Err(anyhow::anyhow!("yamux error in message loop: {}", e)),
+                        None => return Ok(()),
+                    };
+                    drop(conn_lock2);
 
-            // Check if this is a response to a pending forwarded command
-            // Extract state early to avoid holding locks across await
-            let (pending_tx, disp, state_arc) = {
-                let disp = dispatcher.lock().unwrap().clone();
-                let state_val = state.lock().unwrap().clone();
-                let msg_id = msg.message_id.clone();
+                    // Create Arc<Mutex> for message loop
+                    let stream_compat = stream_for_loop.compat();
+                    let stream_arc = Arc::new(tokio::sync::Mutex::new(stream_compat));
 
-                // Check if this message has a pending response waiting
-                let pending_tx = state_val.as_ref().and_then(|s| {
-                    s.lock().unwrap().take_pending_response(&msg_id)
-                });
+                    // Message loop: read commands from stream 0 and dispatch with dedup
+                    loop {
+                        // --- READ MESSAGE (lock scope isolated) ---
+                        let msg = {
+                            let mut stream_lock = stream_arc.lock().await;
 
-                (pending_tx, disp, state_val)
-            };
+                            match PeerSession::read_message(&mut *stream_lock).await {
+                                Ok(Some(msg)) => msg,
+                                Ok(None) => {
+                                    info!("Peer stream ended");
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!("Error reading from peer stream: {}", e);
+                                    break;
+                                }
+                            }
+                        };
 
-            // Check dedup before processing
-            let msg_id = msg.message_id.clone();
-            if let Some(ref state_ref) = state_arc {
-                if state_ref.lock().unwrap().has_seen_message(&msg_id) {
-                    info!("Skipping duplicate message: {}", msg_id);
-                    continue;
-                }
-                state_ref.lock().unwrap().mark_message_seen(msg_id.clone());
-            }
+                        // --- STATE ACCESS (no clone, minimal locking) ---
+                        let msg_id = msg.message_id.clone();
 
-            // Route message via dispatcher if available
-            if let Some(disp) = disp {
-                if let Some(state_ref) = state_arc {
-                    // Check if this is a response destined for a pending oneshot
-                    if let Some(tx) = pending_tx {
-                        // This is a response to a forwarded command - send to the waiting caller
-                        if tx.send(msg.clone()).is_err() {
-                            info!("Failed to send response to waiting caller for message: {}", msg_id);
+                        let pending_tx = {
+                            let state_guard = state.lock().unwrap();
+                            state_guard
+                                .as_ref()
+                                .and_then(|s| s.lock().unwrap().take_pending_response(&msg_id))
+                        };
+
+                        let already_seen = {
+                            let state_guard = state.lock().unwrap();
+                            if let Some(ref s) = *state_guard {
+                                let mut s = s.lock().unwrap();
+
+                                if s.has_seen_message(&msg_id) {
+                                    true
+                                } else {
+                                    s.mark_message_seen(msg_id.clone());
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+
+                        if already_seen {
+                            info!("Skipping duplicate message: {}", msg_id);
+                            continue;
                         }
-                        // Don't re-dispatch - this message is already the final response
-                        continue;
-                    }
 
-                    // Dispatch the message (route_message handles target_wraith_id routing)
-                    let _ = disp.route_message(msg, state_ref).await;
+                        // --- Pending response handling ---
+                        if let Some(tx) = pending_tx {
+                            if tx.send(msg).is_err() {
+                                info!("Failed to send response for {}", msg_id);
+                            }
+                            continue;
+                        }
+
+                        // --- Route normal message ---
+                        let state_ref = {
+                            let state_guard = state.lock().unwrap();
+                            state_guard.clone()
+                        };
+                        if let Some(state_ref) = state_ref {
+                            let _ = tunnel_manager.route_message(msg, state_ref).await;
+                        }
+                    }
                 }
             }
         }
@@ -304,9 +340,118 @@ impl TunnelManager {
         Ok(())
     }
 
+    /// Route a message: check target_wraith_id, forward to peer or dispatch locally
+    pub async fn route_message(
+        &self,
+        msg: WraithMessage,
+        state: Arc<Mutex<crate::wraith::state::WraithState>>,
+    ) -> Option<WraithMessage> {
+        let target = msg.target_wraith_id.clone();
+        let local_id = state.lock().unwrap().wraith_id.clone();
+        let msg_id = msg.message_id.clone();
+
+        // If targeted to us, dispatch locally
+        if target.is_empty() || target == local_id {
+            return self.dispatch(msg, state).await;
+        }
+
+        // If targeted to a direct peer, forward to that peer and wait for response
+        let peer = {
+            let peer_table = state.lock().unwrap().peer_table.clone();
+            peer_table.get(&target).cloned()
+        };
+
+        if let Some(peer) = peer {
+            let (response_tx, response_rx) = oneshot::channel::<WraithMessage>();
+
+            state.lock().unwrap().register_pending_response(msg_id.clone(), response_tx);
+
+            let msg_clone = msg.clone();
+            debug!("Passing message to direct peer {}", peer.wraith_id);
+            let send_result = peer.sender.send(msg_clone).await;
+            if send_result.is_ok() {
+                match response_rx.await {
+                    Ok(response) => {
+                        debug!("Received answer for peer forwarding from {}.", peer.wraith_id);
+                        state.lock().unwrap().take_pending_response(&msg_id);
+                        return Some(response);
+                    }
+                    Err(_) => {
+                        info!("Peer response channel closed for message: {}", msg_id);
+                        state.lock().unwrap().take_pending_response(&msg_id);
+                    }
+                }
+            } else {
+                info!("Failed to send to peer {}: {:?}", peer.wraith_id, send_result.err());
+                state.lock().unwrap().take_pending_response(&msg_id);
+            }
+        }
+
+        debug!("Sending command to all peers");
+        // Broadcast to all peers
+        let peers: Vec<_> = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect()
+        };
+        for peer in peers {
+            let _ = peer.command_tx.send(msg.clone()).await;
+        }
+
+        Some(MessageCodec::create_command_result(
+            "".to_string(),
+            "broadcast".to_string(),
+            "".to_string(),
+            0, 0, "".to_string(),
+        ))
+    }
+
+    /// Dispatch a message locally
+    async fn dispatch(
+        &self,
+        msg: WraithMessage,
+        state: Arc<Mutex<crate::wraith::state::WraithState>>,
+    ) -> Option<WraithMessage> {
+        let msg_type = msg.msg_type;
+        info!("Dispatching message of type: {:?}", msg_type);
+
+        if msg_type == MessageType::Command as i32 {
+            if let Some(crate::proto::wraith::wraith_message::Payload::Command(cmd)) = &msg.payload {
+                let result = if cmd.action == "create_relay" {
+                    let relay_commands = self.relay_commands.lock().unwrap();
+                    let local_wraith_id = state.lock().unwrap().wraith_id.clone();
+                    relay_commands.handle_create_relay(cmd, &local_wraith_id)
+                } else if cmd.action == "delete_relay" || cmd.action == "list_relays" {
+                    self.relay_commands.lock().unwrap().execute(cmd)
+                } else if cmd.action == "set_id" {
+                    self.agent_commands.lock().unwrap().handle_set_id(cmd, &mut state.lock().unwrap())
+                } else if cmd.action == "list_peers" {
+                    self.agent_commands.lock().unwrap().handle_list_peers(cmd, &state.lock().unwrap())
+                } else if cmd.action == "wraith_listen" {
+                    self.agent_commands.lock().unwrap().handle_wraith_listen(cmd)
+                } else if cmd.action == "wraith_connect" {
+                    self.agent_commands.lock().unwrap().handle_wraith_connect(cmd, &state.lock().unwrap())
+                } else {
+                    return None;
+                };
+
+                state.lock().unwrap().increment_commands();
+
+                return Some(MessageCodec::create_command_result(
+                    result.command_id,
+                    result.status,
+                    result.output,
+                    result.exit_code,
+                    result.duration_ms,
+                    result.error,
+                ));
+            }
+        }
+        None
+    }
+
     /// Connect to a remote peer wraith
     pub async fn connect_to_peer(
-        &self,
+        self: Arc<Self>,
         addr: String,
         wraith_id: String,
         hostname: String,
@@ -314,28 +459,23 @@ impl TunnelManager {
     ) -> anyhow::Result<()> {
         use futures::io::AsyncWriteExt;
 
-        // Connect to peer via TCP
         let stream = TcpStream::connect(&addr).await?;
         let peer_addr = stream.peer_addr()?;
         info!("Connecting to peer at {}", peer_addr);
 
-        // Create Yamux connection as client
         let config = yamux::Config::default();
         let conn = yamux::Connection::new(stream.compat(), config, yamux::Mode::Client);
 
-        // Drive the connection in the background so frames get written to the socket
         let conn_handle = Arc::new(tokio::sync::Mutex::new(conn));
         let conn_handle_for_spawn = conn_handle.clone();
         tokio::spawn(async move {
             let mut c = conn_handle_for_spawn.lock().await;
             loop {
-                // Need to poll both inbound AND outbound to drive the connection
                 match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_next_inbound(cx)).await {
                     Some(Ok(_)) => { /* handle incoming */ }
                     Some(Err(e)) => { warn!("Peer connection client error: {}", e); break; }
                     None => { info!("Peer connection client: connection closed"); break; }
                 }
-                // Also poll for outbound to flush writes
                 match futures::future::poll_fn(|cx| Pin::new(&mut c).poll_new_outbound(cx)).await {
                     Ok(_stream) => { /* outbound stream ready */ }
                     Err(e) => { warn!("Peer connection client outbound error: {}", e); break; }
@@ -344,15 +484,12 @@ impl TunnelManager {
             info!("Peer connection client driver finished");
         });
 
-        // Open stream 0 for registration using poll_new_outbound
-        info!("Before Sending Wraith registration");
         let mut stream = {
             let mut conn_lock = conn_handle.lock().await;
             poll_fn(|cx| Pin::new(&mut conn_lock).poll_new_outbound(cx)).await?
         };
         info!("Opened outbound stream, sending Wraith registration");
 
-        // Send WraithRegistration
         let reg = crate::proto::wraith::WraithRegistration {
             wraith_id: wraith_id.clone(),
             hostname: hostname.clone(),
@@ -368,7 +505,6 @@ impl TunnelManager {
             target_wraith_id: String::new(),
         };
 
-        // Encode and send registration message
         let data = crate::message::codec::MessageCodec::encode(&reg_msg);
         let len = data.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
@@ -377,50 +513,116 @@ impl TunnelManager {
 
         debug!("Sent WraithRegistration to peer at {}", addr);
 
-        // Wrap stream in Arc<Mutex> for shared access by forwarding task
-        let stream_arc = Arc::new(tokio::sync::Mutex::new(stream));
-
-        // Create channels for command communication
+        // Split stream into read/write halves - writer task takes write_half
+        let stream_compat = stream.compat();
+        let (read_half, mut write_half) = tokio::io::split(stream_compat);
         let (tx, mut rx) = mpsc::channel::<crate::proto::wraith::WraithMessage>(100);
-        info!("Client created mpsc channel, tx sender count: {}", tx.max_capacity());
 
-        // Create peer session and add to tunnel manager
         let session = PeerSession::new(
             wraith_id.clone(),
             hostname.clone(),
-            conn_handle,
+            conn_handle.clone(),
             tx,
         );
 
         self.add_session(wraith_id.clone(), session).await;
 
-        // Spawn task to forward messages from channel to peer via Yamux stream 0
-        let stream_arc_for_fwd = Arc::clone(&stream_arc);
         let wraith_id_for_fwd = wraith_id.clone();
         tokio::spawn(async move {
-            debug!("Client forwarder task started for {}", wraith_id_for_fwd);
             while let Some(msg) = rx.recv().await {
-                debug!("TEST! client forwarder for {}", wraith_id_for_fwd);
-                debug!("Client forwarder: about to acquire lock");
-                let mut stream = stream_arc_for_fwd.lock().await;
-                debug!("Client forwarder: lock acquired");
-                debug!("Client forwarder: encoding message");
-                let data = crate::message::codec::MessageCodec::encode(&msg);
-                debug!("Client forwarder: encoded {} bytes", data.len());
-                debug!("Client forwarder: about to write to stream");
-                match stream.write_all(&data).await {
-                    Ok(()) => debug!("Client forwarder: write_all succeeded"),
-                    Err(e) => { warn!("Client forwarder: write_all failed: {}", e); break; }
+                if let Err(e) = PeerSession::write_message(&mut write_half, &msg).await {
+                    warn!("Failed to forward message: {}", e);
+                    break;
                 }
-                debug!("Client forwarder: about to flush");
-                match stream.flush().await {
-                    Ok(()) => debug!("Client forwarder: flush succeeded"),
-                    Err(e) => { warn!("Client forwarder: flush failed: {}", e); break; }
-                }
-                debug!("Client forwarder: write_message succeeded for {}", wraith_id_for_fwd);
             }
-            debug!("Client forwarder: rx.recv() returned None, exiting");
-            info!("Peer command forwarder task finished for {}", wraith_id_for_fwd);
+            info!("Writer task finished for {}", wraith_id_for_fwd);
+        });
+
+        info!("Registered peer: {}", wraith_id);
+
+        // Get a new outbound stream for the message loop (Stream 1)
+        let conn_handle2 = conn_handle.clone();
+        let mut conn_lock2 = conn_handle2.lock().await;
+        let stream_for_loop = match poll_fn(|cx| Pin::new(&mut conn_lock2).poll_new_outbound(cx)).await {
+            Ok(s) => s,
+            Err(e) => return Err(anyhow::anyhow!("yamux error getting message loop stream: {}", e)),
+        };
+        drop(conn_lock2);
+
+        let stream_compat = stream_for_loop.compat();
+        let stream_arc = Arc::new(tokio::sync::Mutex::new(stream_compat));
+
+        // Message loop: read commands from stream and dispatch with dedup
+        let state = Arc::clone(&self.state);
+        let tunnel_manager = self;
+        let wraith_id_for_loop = wraith_id.clone();
+        tokio::spawn(async move {
+            loop {
+                // --- READ MESSAGE (lock scope isolated) ---
+                let msg = {
+                    let mut stream_lock = stream_arc.lock().await;
+
+                    match PeerSession::read_message(&mut *stream_lock).await {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => {
+                            info!("Peer stream ended for {}", wraith_id_for_loop);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Error reading from peer stream: {}", e);
+                            break;
+                        }
+                    }
+                };
+
+                // --- STATE ACCESS (no clone, minimal locking) ---
+                let msg_id = msg.message_id.clone();
+
+                let pending_tx = {
+                    let state_guard = state.lock().unwrap();
+                    state_guard
+                        .as_ref()
+                        .and_then(|s| s.lock().unwrap().take_pending_response(&msg_id))
+                };
+
+                let already_seen = {
+                    let state_guard = state.lock().unwrap();
+                    if let Some(ref s) = *state_guard {
+                        let mut s = s.lock().unwrap();
+
+                        if s.has_seen_message(&msg_id) {
+                            true
+                        } else {
+                            s.mark_message_seen(msg_id.clone());
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if already_seen {
+                    info!("Skipping duplicate message: {}", msg_id);
+                    continue;
+                }
+
+                // --- Pending response handling ---
+                if let Some(tx) = pending_tx {
+                    if tx.send(msg).is_err() {
+                        info!("Failed to send response for {}", msg_id);
+                    }
+                    continue;
+                }
+
+                // --- Route normal message ---
+                let state_ref = {
+                    let state_guard = state.lock().unwrap();
+                    state_guard.clone()
+                };
+                if let Some(state_ref) = state_ref {
+                    let _ = tunnel_manager.route_message(msg, state_ref).await;
+                }
+            }
         });
 
         info!("Established peer connection: {}", wraith_id);

