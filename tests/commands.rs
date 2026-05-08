@@ -2,9 +2,13 @@
 mod command_tests {
     use wraith::wraith::state::WraithState;
 
+    fn make_state() -> WraithState {
+        WraithState::default()
+    }
+
     #[test]
     fn test_state_increment_commands() {
-        let mut state = WraithState::new();
+        let mut state = make_state();
         assert_eq!(state.commands_executed, 0);
         assert_eq!(state.last_command_time, 0);
 
@@ -16,7 +20,7 @@ mod command_tests {
 
     #[test]
     fn test_state_set_connected() {
-        let mut state = WraithState::new();
+        let mut state = make_state();
         assert!(!state.connected);
 
         state.set_connected(true);
@@ -28,7 +32,7 @@ mod command_tests {
 
     #[test]
     fn test_state_system_info() {
-        let state = WraithState::new();
+        let state = make_state();
         // System info should be populated
         assert!(!state.hostname.is_empty());
         assert!(!state.username.is_empty());
@@ -43,7 +47,7 @@ mod command_tests {
         use std::sync::{Arc, Mutex};
 
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
-        let state = WraithState::new_with_relay_manager("test-wraith-id".to_string(), relay_manager.clone());
+        let state = WraithState::new("test-wraith-id".to_string(), relay_manager.clone());
 
         // State should be initialized with the provided relay manager
         assert!(state.relay_manager.lock().is_ok());

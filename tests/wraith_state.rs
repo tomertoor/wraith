@@ -2,9 +2,13 @@
 mod tests {
     use wraith::wraith::state::WraithState;
 
+    fn make_state() -> WraithState {
+        WraithState::default()
+    }
+
     #[test]
     fn test_wraith_id_generation() {
-        let state = WraithState::new();
+        let state = make_state();
         assert!(!state.wraith_id.is_empty());
         // Should be valid UUID format
         assert!(uuid::Uuid::parse_str(&state.wraith_id).is_ok());
@@ -12,13 +16,13 @@ mod tests {
 
     #[test]
     fn test_peer_table_empty() {
-        let state = WraithState::new();
+        let state = make_state();
         assert!(state.peer_table.is_empty());
     }
 
     #[test]
     fn test_message_loop_prevention() {
-        let state = WraithState::new();
+        let state = make_state();
         let msg_id = "test-123";
 
         assert!(!state.has_seen_message(msg_id));
@@ -28,7 +32,7 @@ mod tests {
 
     #[test]
     fn test_set_wraith_id() {
-        let mut state = WraithState::new();
+        let mut state = make_state();
         let original_id = state.wraith_id.clone();
 
         state.set_wraith_id("custom-id".to_string());
@@ -41,7 +45,7 @@ mod tests {
 
     #[test]
     fn test_peer_connection_add_remove() {
-        let mut state = WraithState::new();
+        let mut state = make_state();
         use wraith::wraith::state::PeerConnection;
         use tokio::sync::mpsc;
 

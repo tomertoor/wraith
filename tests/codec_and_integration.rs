@@ -262,7 +262,7 @@ mod relay_commands_tests {
         };
 
         let result = cmd.handle_delete_relay(&proto_cmd);
-        assert_eq!(result.status, "not_found");
+        assert_eq!(result.status, "error");
         assert_eq!(result.exit_code, -1);
     }
 
@@ -288,7 +288,7 @@ mod relay_commands_tests {
 #[cfg(test)]
 mod agent_commands_tests {
     use wraith::commands::agent::AgentCommands;
-    use wraith::wraith::tunnel::TunnelManager;
+    use wraith::wraith::session::TunnelManager;
     use wraith::wraith::state::WraithState;
     use wraith::proto::wraith::Command as ProtoCommand;
     use std::sync::{Arc, Mutex};
@@ -299,7 +299,7 @@ mod agent_commands_tests {
     }
 
     fn make_state() -> WraithState {
-        WraithState::new()
+        WraithState::default()
     }
 
     #[test]
@@ -395,18 +395,23 @@ mod agent_commands_tests {
 
 #[cfg(test)]
 mod tunnel_manager_tests {
-    use wraith::wraith::tunnel::{TunnelManager, PeerSession};
+    use wraith::wraith::session::{TunnelManager, PeerSession};
     use wraith::commands::relay::RelayCommands;
     use wraith::commands::agent::AgentCommands;
+    use wraith::wraith::state::WraithState;
     use wraith::relay::RelayManager;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
 
     fn make_tunnel_manager() -> Arc<TunnelManager> {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
-        let relay_commands = RelayCommands::new_without_tunnel(relay_manager);
-        let agent_commands = AgentCommands::new_without_tunnel();
-
-        Arc::new(TunnelManager::with_commands(relay_commands, agent_commands))
+        let state = Arc::new(Mutex::new(WraithState::new("test".to_string(), Arc::clone(&relay_manager))));
+        let (tx, _rx) = mpsc::channel(100);
+        let manager = Arc::new(TunnelManager::new(state, tx));
+        let relay_commands = RelayCommands::new(Arc::clone(&relay_manager), Arc::clone(&manager));
+        let agent_commands = AgentCommands::new(Arc::clone(&manager));
+        manager.set_commands(relay_commands, agent_commands);
+        manager
     }
 
     #[tokio::test]
@@ -441,13 +446,15 @@ mod tunnel_manager_tests {
     }
 
     #[tokio::test]
-    async fn test_tunnel_manager_set_state() {
-        use wraith::wraith::state::WraithState;
+    async fn test_tunnel_manager_new_with_state() {
+        // TunnelManager::new now requires state and peer event channel at construction time
+        let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
+        let state = Arc::new(Mutex::new(WraithState::new("test-state".to_string(), relay_manager)));
+        let (tx, _rx) = mpsc::channel(100);
+        let manager = TunnelManager::new(state, tx);
 
-        let manager = make_tunnel_manager();
-        let state = Arc::new(Mutex::new(WraithState::new()));
-
-        manager.set_state(state);
+        // Verify basic functionality works
+        assert!(manager.list_sessions().await.is_empty());
     }
 }
 
@@ -459,9 +466,13 @@ mod integration_tests {
     use std::sync::{Arc, Mutex};
     use std::collections::HashMap;
 
+    fn make_state() -> WraithState {
+        WraithState::default()
+    }
+
     #[test]
     fn test_state_commands_tracking() {
-        let mut state = WraithState::new();
+        let mut state = make_state();
         assert_eq!(state.commands_executed, 0);
 
         state.increment_commands();
@@ -474,7 +485,7 @@ mod integration_tests {
 
     #[test]
     fn test_pending_response_lifecycle() {
-        let state = WraithState::new();
+        let state = make_state();
         let msg_id = "pending-test-123".to_string();
 
         // Initially no pending response
@@ -494,7 +505,7 @@ mod integration_tests {
 
     #[test]
     fn test_message_loop_prevention_tracking() {
-        let state = WraithState::new();
+        let state = make_state();
         let msg_id = "msg-duplicate-test";
 
         // First time should not be seen
@@ -530,5 +541,229 @@ mod integration_tests {
         let relays = manager.list_relays();
         assert_eq!(relays.len(), 1);
         assert!(relays[0].protocol.contains("udp"));
+    }
+}
+
+#[cfg(test)]
+mod peer_routing_tests {
+    use wraith::wraith::session::{TunnelManager, PeerEvent};
+    use wraith::wraith::state::WraithState;
+    use wraith::commands::relay::RelayCommands;
+    use wraith::commands::agent::AgentCommands;
+    use wraith::relay::RelayManager;
+    use wraith::message::codec::MessageCodec;
+    use std::sync::{Arc, Mutex};
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    /// Create a fully initialized TunnelManager with the given wraith_id.
+    /// Processes PeerEvent updates in the background so peer_table stays in sync.
+    fn make_wraith(wraith_id: &str) -> (Arc<TunnelManager>, Arc<Mutex<WraithState>>) {
+        let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
+        let state = Arc::new(Mutex::new(WraithState::new(
+            wraith_id.to_string(),
+            Arc::clone(&relay_manager),
+        )));
+        let (peer_event_tx, mut peer_event_rx) = mpsc::channel::<PeerEvent>(100);
+        let manager = Arc::new(TunnelManager::new(Arc::clone(&state), peer_event_tx));
+
+        let relay_cmds = RelayCommands::new(Arc::clone(&relay_manager), Arc::clone(&manager));
+        let agent_cmds = AgentCommands::new(Arc::clone(&manager));
+        manager.set_commands(relay_cmds, agent_cmds);
+
+        // Background task: process PeerEvent → state.peer_table
+        let state_events = Arc::clone(&state);
+        tokio::spawn(async move {
+            while let Some(event) = peer_event_rx.recv().await {
+                match event {
+                    PeerEvent::Added { wraith_id, hostname, sender } => {
+                        state_events.lock().expect("state lock").add_peer(wraith_id, hostname, sender);
+                    }
+                    PeerEvent::Removed { wraith_id } => {
+                        state_events.lock().expect("state lock").remove_peer(&wraith_id);
+                    }
+                }
+            }
+        });
+
+        (manager, state)
+    }
+
+    /// End-to-end test: C2 → Wraith A (ID "2") → Wraith B (ID "5")
+    ///
+    /// Sets up two wraith instances connected via TCP+Yamux. Wraith A (client, ID "2")
+    /// connects to Wraith B (server, ID "5"). After registration exchange, Wraith A
+    /// knows about peer "5" and Wraith B knows about peer "2".
+    ///
+    /// Verifies that a list_relays command targeted at "5" gets routed from A to B
+    /// and the response comes back.
+    #[tokio::test]
+    async fn test_peer_routing_list_relays_through_chain() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+
+        // Create Wraith A (ID "2") and Wraith B (ID "5")
+        let (manager_a, state_a) = make_wraith("2");
+        let (manager_b, state_b) = make_wraith("5");
+
+        // Wraith B accepts a peer connection
+        let manager_b_clone = Arc::clone(&manager_b);
+        let state_b_clone = Arc::clone(&state_b);
+        let accept_handle = tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            TunnelManager::handle_peer_connection(stream, state_b_clone, manager_b_clone)
+                .await
+                .unwrap();
+        });
+
+        // Wraith A connects to Wraith B, sending its local ID "2"
+        manager_a
+            .clone()
+            .connect_to_peer(
+                format!("127.0.0.1:{}", peer_addr.port()),
+                "2".to_string(),       // local_wraith_id
+                "host-a".to_string(),  // local_hostname
+                "linux".to_string(),   // local_os
+            )
+            .await
+            .unwrap();
+
+        // Give time for peer event processing
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Verify Wraith A now knows about peer "5" (Wraith B's ID)
+        {
+            let sa = state_a.lock().expect("state lock");
+            assert!(sa.peer_table.contains_key("5"),
+                "Wraith A should have peer '5' in peer_table, got: {:?}",
+                sa.peer_table.keys().collect::<Vec<_>>());
+        }
+
+        // Verify Wraith B knows about peer "2" (Wraith A's ID)
+        {
+            let sb = state_b.lock().expect("state lock");
+            assert!(sb.peer_table.contains_key("2"),
+                "Wraith B should have peer '2' in peer_table, got: {:?}",
+                sb.peer_table.keys().collect::<Vec<_>>());
+        }
+
+        // Route a list_relays command from Wraith A targeting Wraith B (ID "5")
+        let cmd = MessageCodec::create_command(
+            "cmd-list-relays-1".to_string(),
+            "list_relays".to_string(),
+            HashMap::new(),
+            30,
+            "5".to_string(), // target_wraith_id = Wraith B
+        );
+
+        let response = manager_a.route_message(cmd).await;
+
+        assert!(response.is_some(), "Should receive a response from Wraith B");
+
+        let resp = response.unwrap();
+        assert_eq!(resp.msg_type, wraith::proto::wraith::MessageType::CommandResult as i32);
+
+        if let Some(wraith::proto::wraith::wraith_message::Payload::Result(result)) = &resp.payload {
+            assert_eq!(result.status, "success", "list_relays should succeed on Wraith B, got: {}", result.error);
+            assert_eq!(result.output, "[]", "Wraith B should have no relays");
+        } else {
+            panic!("Expected CommandResult payload, got {:?}", resp.payload);
+        }
+
+        accept_handle.abort();
+    }
+
+    /// Test that a command targeted at the local wraith is dispatched locally
+    /// without being forwarded to any peer.
+    #[tokio::test]
+    async fn test_local_dispatch_no_forward() {
+        let (manager_a, state_a) = make_wraith("2");
+
+        // Create a list_relays command targeted at wraith "2" itself
+        let cmd = MessageCodec::create_command(
+            "cmd-local-1".to_string(),
+            "list_relays".to_string(),
+            HashMap::new(),
+            30,
+            "2".to_string(), // target = self
+        );
+
+        let response = manager_a.route_message(cmd).await;
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        if let Some(wraith::proto::wraith::wraith_message::Payload::Result(result)) = &resp.payload {
+            assert_eq!(result.status, "success");
+        } else {
+            panic!("Expected CommandResult payload");
+        }
+    }
+
+    /// Test that a relay created on Wraith A doesn't appear when listing relays
+    /// on Wraith B through peer routing.
+    #[tokio::test]
+    async fn test_peer_routing_relay_isolation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+
+        let (manager_a, state_a) = make_wraith("2");
+        let (manager_b, state_b) = make_wraith("5");
+
+        // Create a relay on Wraith A directly (not through routing)
+        {
+            let rm = state_a.lock().expect("state lock").relay_manager.clone();
+            let relay_id = rm.lock().unwrap().create_relay(
+                wraith::relay::RelayConfig::new(
+                    wraith::relay::RelayEndpoint::from_str("127.0.0.1", 40001, "tcp"),
+                    wraith::relay::RelayEndpoint::from_str("127.0.0.1", 40002, "tcp"),
+                ),
+            );
+            assert!(!relay_id.is_empty());
+        }
+
+        // Wraith B accepts peer
+        let manager_b_clone = Arc::clone(&manager_b);
+        let state_b_clone = Arc::clone(&state_b);
+        let accept_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            TunnelManager::handle_peer_connection(stream, state_b_clone, manager_b_clone)
+                .await
+                .unwrap();
+        });
+
+        // Connect A → B (A sends local ID "2")
+        manager_a.clone()
+            .connect_to_peer(
+                format!("127.0.0.1:{}", peer_addr.port()),
+                "2".to_string(),
+                "host-a".to_string(),
+                "linux".to_string(),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // List relays on Wraith B (ID "5") via routing — should be empty
+        let cmd = MessageCodec::create_command(
+            "cmd-isolation-1".to_string(),
+            "list_relays".to_string(),
+            HashMap::new(),
+            30,
+            "5".to_string(), // target Wraith B
+        );
+
+        let response = manager_a.route_message(cmd).await;
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        if let Some(wraith::proto::wraith::wraith_message::Payload::Result(result)) = &resp.payload {
+            assert_eq!(result.status, "success");
+            assert_eq!(result.output, "[]", "Wraith B should have no relays (relay on A shouldn't leak)");
+        } else {
+            panic!("Expected CommandResult payload");
+        }
+
+        accept_handle.abort();
     }
 }

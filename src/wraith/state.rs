@@ -1,5 +1,6 @@
 use crate::relay::RelayManager;
-use std::collections::{HashMap, HashSet};
+use dashmap::DashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
@@ -17,12 +18,60 @@ pub struct DedupResult {
     pub pending_tx: Option<oneshot::Sender<crate::proto::wraith::WraithMessage>>,
 }
 
+/// Tracks seen message IDs and pending responses for deduplication.
+pub struct DedupState {
+    seen_ids: DashSet<String>,
+    pending_responses: std::sync::Mutex<HashMap<String, oneshot::Sender<crate::proto::wraith::WraithMessage>>>,
+}
+
+impl DedupState {
+    pub fn new() -> Self {
+        Self {
+            seen_ids: DashSet::new(),
+            pending_responses: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn has_seen(&self, message_id: &str) -> bool {
+        self.seen_ids.contains(message_id)
+    }
+
+    pub fn mark_seen(&self, message_id: String) {
+        self.seen_ids.insert(message_id);
+    }
+
+    pub fn register_pending(&self, message_id: String, tx: oneshot::Sender<crate::proto::wraith::WraithMessage>) {
+        self.pending_responses.lock().expect("pending_responses lock poisoned").insert(message_id, tx);
+    }
+
+    pub fn take_pending(&self, message_id: &str) -> Option<oneshot::Sender<crate::proto::wraith::WraithMessage>> {
+        self.pending_responses.lock().expect("pending_responses lock poisoned").remove(message_id)
+    }
+
+    /// Check if a message has been seen, returning any pending response sender.
+    /// Marks as seen if this is the first time.
+    pub fn check_and_mark(&self, msg_id: &str) -> DedupResult {
+        let pending_tx = self.take_pending(msg_id);
+
+        let already_seen = if self.seen_ids.contains(msg_id) {
+            true
+        } else {
+            self.seen_ids.insert(msg_id.to_string());
+            false
+        };
+
+        DedupResult {
+            already_seen,
+            pending_tx,
+        }
+    }
+}
+
 pub struct WraithState {
     pub relay_manager: Arc<Mutex<RelayManager>>,
     pub wraith_id: String,
     pub peer_table: HashMap<String, PeerConnection>,
-    pub seen_message_ids: std::sync::Mutex<HashSet<String>>,
-    pub pending_responses: std::sync::Mutex<HashMap<String, oneshot::Sender<crate::proto::wraith::WraithMessage>>>,
+    pub dedup: DedupState,
     pub hostname: String,
     pub username: String,
     pub os: String,
@@ -33,7 +82,7 @@ pub struct WraithState {
 }
 
 impl WraithState {
-    pub fn new() -> Self {
+    pub fn new(wraith_id: String, relay_manager: Arc<Mutex<RelayManager>>) -> Self {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -41,49 +90,16 @@ impl WraithState {
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
-
-        let os = std::env::consts::OS.to_string();
-        let ip_address = "0.0.0.0".to_string();
-        let wraith_id = uuid::Uuid::new_v4().to_string();
-
-        Self {
-            relay_manager: Arc::new(Mutex::new(RelayManager::new())),
-            wraith_id,
-            peer_table: HashMap::new(),
-            seen_message_ids: std::sync::Mutex::new(HashSet::new()),
-            pending_responses: std::sync::Mutex::new(HashMap::new()),
-            hostname,
-            username,
-            os,
-            ip_address,
-            commands_executed: 0,
-            last_command_time: 0,
-            connected: false,
-        }
-    }
-
-    pub fn new_with_relay_manager(wraith_id: String, relay_manager: Arc<Mutex<RelayManager>>) -> Self {
-        let hostname = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        let username = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        let os = std::env::consts::OS.to_string();
-        let ip_address = "0.0.0.0".to_string();
 
         Self {
             relay_manager,
             wraith_id,
             peer_table: HashMap::new(),
-            seen_message_ids: std::sync::Mutex::new(HashSet::new()),
-            pending_responses: std::sync::Mutex::new(HashMap::new()),
+            dedup: DedupState::new(),
             hostname,
             username,
-            os,
-            ip_address,
+            os: std::env::consts::OS.to_string(),
+            ip_address: "0.0.0.0".to_string(),
             commands_executed: 0,
             last_command_time: 0,
             connected: false,
@@ -118,67 +134,31 @@ impl WraithState {
     }
 
     pub fn has_seen_message(&self, message_id: &str) -> bool {
-        self.seen_message_ids.lock().unwrap().contains(message_id)
+        self.dedup.has_seen(message_id)
     }
 
     pub fn mark_message_seen(&self, message_id: String) {
-        self.seen_message_ids.lock().unwrap().insert(message_id);
+        self.dedup.mark_seen(message_id)
     }
 
-    /// Register a pending response for a forwarded command
     pub fn register_pending_response(&self, message_id: String, tx: oneshot::Sender<crate::proto::wraith::WraithMessage>) {
-        self.pending_responses.lock().unwrap().insert(message_id, tx);
+        self.dedup.register_pending(message_id, tx);
     }
 
-    /// Check if there's a pending response for a message
     pub fn take_pending_response(&self, message_id: &str) -> Option<oneshot::Sender<crate::proto::wraith::WraithMessage>> {
-        self.pending_responses.lock().unwrap().remove(message_id)
+        self.dedup.take_pending(message_id)
     }
 
-    /// Check if a message has been seen, and if so return the pending response sender.
-    /// Marks the message as seen if this is the first time.
     pub fn check_and_mark_seen(&self, msg_id: &str) -> DedupResult {
-        let pending_tx = self
-            .pending_responses
-            .lock()
-            .unwrap()
-            .remove(msg_id);
-
-        let already_seen = if self.seen_message_ids.lock().unwrap().contains(msg_id) {
-            true
-        } else {
-            self.seen_message_ids.lock().unwrap().insert(msg_id.to_string());
-            false
-        };
-
-        DedupResult {
-            already_seen,
-            pending_tx,
-        }
-    }
-
-    /// Add a peer connection to the peer table.
-    pub fn add_peer_to_state(
-        &mut self,
-        wraith_id: String,
-        hostname: String,
-        sender: mpsc::Sender<crate::proto::wraith::WraithMessage>,
-    ) {
-        let connected_at = chrono::Utc::now().timestamp_millis();
-        self.peer_table.insert(
-            wraith_id.clone(),
-            PeerConnection {
-                wraith_id,
-                hostname,
-                connected_at,
-                sender,
-            },
-        );
+        self.dedup.check_and_mark(msg_id)
     }
 }
 
 impl Default for WraithState {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(Mutex::new(RelayManager::new())),
+        )
     }
 }

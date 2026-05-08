@@ -6,6 +6,7 @@ pub mod connection;
 pub mod message;
 pub mod commands;
 pub mod relay;
+pub mod router;
 pub mod wraith;
 
 use clap::Parser;
@@ -140,7 +141,7 @@ async fn main() {
         // Clone shared state for the peer connection task
         let tm = Arc::clone(&tunnel_manager);
         let (wraith_id, hostname, os) = {
-            let s = state.lock().unwrap();
+            let s = state.lock().expect("state lock poisoned");
             (s.wraith_id.clone(), s.hostname.clone(), s.os.clone())
         };
 

@@ -1,15 +1,25 @@
 #[cfg(test)]
 mod tunnel_tests {
-    use wraith::wraith::tunnel::TunnelManager;
+    use wraith::wraith::session::TunnelManager;
+    use wraith::wraith::state::WraithState;
+    use wraith::relay::RelayManager;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
 
-    // Note: These tests are currently skipped due to stack overflow
-    // when TunnelManager::new() creates recursive command handler chains.
-    // Use TunnelManager::with_commands() for proper initialization in production.
+    fn make_manager() -> TunnelManager {
+        let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
+        let state = Arc::new(Mutex::new(WraithState::new("test".to_string(), Arc::clone(&relay_manager))));
+        let (tx, _rx) = mpsc::channel(100);
+        TunnelManager::new(state, tx)
+    }
+
+    // Note: These tests are currently skipped due to the need for network
+    // setup to create real PeerSession objects.
 
     #[tokio::test]
     #[ignore]
     async fn test_tunnel_manager_creation() {
-        let manager = TunnelManager::new();
+        let manager = make_manager();
         // Basic creation test - manager should be empty
         assert!(manager.list_sessions().await.is_empty());
     }
@@ -17,7 +27,7 @@ mod tunnel_tests {
     #[tokio::test]
     #[ignore]
     async fn test_tunnel_manager_list_sessions() {
-        let manager = TunnelManager::new();
+        let manager = make_manager();
         let sessions = manager.list_sessions().await;
         assert!(sessions.is_empty());
     }
@@ -25,7 +35,7 @@ mod tunnel_tests {
     #[tokio::test]
     #[ignore]
     async fn test_tunnel_manager_get_all_session_ids() {
-        let manager = TunnelManager::new();
+        let manager = make_manager();
         let ids = manager.get_all_session_ids().await;
         assert!(ids.is_empty());
     }
@@ -36,7 +46,7 @@ mod tunnel_tests {
         // This test verifies that adding and removing sessions works
         // We can't easily create a real PeerSession without complex setup,
         // so we just verify the manager's async methods work correctly
-        let manager = TunnelManager::new();
+        let manager = make_manager();
 
         // Initially empty
         assert!(manager.list_sessions().await.is_empty());

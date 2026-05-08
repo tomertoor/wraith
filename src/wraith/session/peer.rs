@@ -1,11 +1,12 @@
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::WraithMessage;
 use anyhow::Result;
-use log::debug;
+use log::{debug, info, warn};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use tokio_util::sync::CancellationToken;
 use yamux::{Config, Connection, Mode};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -16,6 +17,7 @@ pub struct PeerSession {
     pub hostname: String,
     pub connection: Arc<tokio::sync::Mutex<yamux::Connection<Compat<TcpStream>>>>,
     pub command_tx: mpsc::Sender<WraithMessage>,
+    cancel_token: CancellationToken,
 }
 
 impl PeerSession {
@@ -30,6 +32,7 @@ impl PeerSession {
             hostname,
             connection,
             command_tx,
+            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -100,5 +103,38 @@ impl PeerSession {
     pub async fn send_command(&self, msg: WraithMessage) -> Result<()> {
         self.command_tx.send(msg).await.map_err(|e| anyhow::anyhow!("send error: {}", e))?;
         Ok(())
+    }
+
+    /// Returns a reference to this session's cancellation token.
+    /// Cancel the token to signal writer tasks to terminate.
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
+    }
+
+    /// Spawn a background writer task that forwards messages from `rx` to `write_half`.
+    /// The task is cancelled automatically when this session's cancellation token is fired.
+    pub fn spawn_writer<W>(&self, write_half: W, mut rx: mpsc::Receiver<WraithMessage>)
+    where
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let cancel = self.cancel_token.clone();
+        let wraith_id = self.wraith_id.clone();
+        tokio::spawn(async move {
+            let mut writer = write_half;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Writer task cancelled for {}", wraith_id);
+                }
+                _ = async {
+                    while let Some(msg) = rx.recv().await {
+                        if let Err(e) = Self::write_message(&mut writer, &msg).await {
+                            warn!("Failed to forward message: {}", e);
+                            break;
+                        }
+                    }
+                    info!("Writer task finished for {}", wraith_id);
+                } => {}
+            }
+        });
     }
 }

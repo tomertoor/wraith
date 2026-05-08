@@ -241,3 +241,209 @@ class TestPeerTunnel:
                 peer_proc.kill()
                 peer_proc.wait()
             wraith_client.disconnect()
+
+
+def _spawn_peer_wraith(wraith_binary_path, wraith_peer_id, wraith_peer_port):
+    """Spawn a secondary wraith process that connects to the main wraith's peer listener.
+
+    Returns the subprocess.Popen object. Caller is responsible for cleanup.
+    """
+    return subprocess.Popen(
+        [
+            wraith_binary_path,
+            "--wraith-id", wraith_peer_id,
+            "--agent-connect", f"127.0.0.1:{wraith_peer_port}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _cleanup_process(proc):
+    """Terminate a subprocess gracefully, falling back to kill."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _wait_for_peer(client, expected_peer_id, max_attempts=15, interval=2):
+    """Poll list_peers until the expected peer appears with 'success' status.
+
+    Returns (success: bool, last_result: dict).
+    """
+    for _ in range(max_attempts):
+        time.sleep(interval)
+        success, list_result = client.list_peers()
+        if success and list_result["status"] == "success":
+            output = json.loads(list_result["output"])
+            peer_ids = [p["wraith_id"] for p in output.get("peers", [])]
+            if expected_peer_id in peer_ids:
+                return True, list_result
+    return False, list_result
+
+
+class TestPeerCommandRouting:
+    """Test command routing through wraith-to-wraith peer tunnels.
+
+    Topology: PyWraith -> Wraith A (C2 listen + agent listen) -> Wraith B (agent connect to A)
+    """
+
+    def _establish_peer_tunnel(
+        self, client, wraith_binary_path, wraith_peer_id, wraith_peer_port
+    ):
+        """Helper: tell A to listen for peers, then spawn B to connect.
+
+        Returns the peer subprocess. Caller must clean up in a finally block.
+        """
+        # Start peer listener on main wraith A
+        success, result = client.wraith_listen(port=wraith_peer_port)
+        assert success, f"wraith_listen failed: {result}"
+
+        # Wait for listener to be ready
+        time.sleep(2)
+
+        # Spawn B connecting to A's peer listener
+        peer_proc = _spawn_peer_wraith(wraith_binary_path, wraith_peer_id, wraith_peer_port)
+
+        # Wait until A sees B as a direct peer
+        found, last_result = _wait_for_peer(client, wraith_peer_id)
+        if not found:
+            _cleanup_process(peer_proc)
+            pytest.fail(
+                f"Peer {wraith_peer_id} never appeared in A's peer table. "
+                f"Last list_peers result: {last_result}"
+            )
+
+        return peer_proc
+
+    def test_list_peers_returns_success_after_peer_connect(
+        self,
+        wraith_client,
+        wraith_process,
+        wraith_binary_path,
+        wraith_peer_id,
+        wraith_peer_port,
+    ):
+        """After A<->B tunnel is established, list_peers on A returns 'success' not 'broadcast'.
+
+        This verifies the peer_table is populated correctly so direct routing works
+        instead of falling through to broadcast.
+        """
+        wraith_client.connect()
+
+        try:
+            peer_proc = self._establish_peer_tunnel(
+                wraith_client, wraith_binary_path, wraith_peer_id, wraith_peer_port
+            )
+
+            try:
+                # Now list_peers on A should return success (not broadcast)
+                success, result = wraith_client.list_peers()
+                assert success, f"list_peers command failed: {result}"
+                assert result["status"] == "success", (
+                    f"Expected 'success' status but got '{result['status']}'. "
+                    f"This indicates the peer_table is not populated correctly. "
+                    f"Full result: {result}"
+                )
+
+                # Verify the peer appears in the output
+                output = json.loads(result["output"])
+                peer_ids = [p["wraith_id"] for p in output.get("peers", [])]
+                assert wraith_peer_id in peer_ids, (
+                    f"Expected peer {wraith_peer_id} in peer list, got: {peer_ids}"
+                )
+            finally:
+                _cleanup_process(peer_proc)
+        finally:
+            wraith_client.disconnect()
+
+    def test_command_routes_through_peer(
+        self,
+        wraith_client,
+        wraith_process,
+        wraith_binary_path,
+        wraith_id,
+        wraith_peer_id,
+        wraith_peer_port,
+    ):
+        """Send a command targeted at B through A; verify direct routing to B succeeds.
+
+        When the client sets target to B's wraith_id and sends list_peers, A should
+        look up B in its peer_table and forward directly, returning B's response
+        (not a broadcast acknowledgement).
+        """
+        wraith_client.connect()
+
+        try:
+            peer_proc = self._establish_peer_tunnel(
+                wraith_client, wraith_binary_path, wraith_peer_id, wraith_peer_port
+            )
+
+            try:
+                # Now target B directly through A
+                wraith_client.set_target(wraith_peer_id)
+
+                # Send list_peers targeted at B
+                success, result = wraith_client.list_peers()
+                assert success, f"list_peers routed to B failed: {result}"
+                assert result["status"] == "success", (
+                    f"Expected 'success' from direct routing to B, "
+                    f"but got '{result['status']}'. "
+                    f"This means A is not doing direct peer lookup and fell through to broadcast. "
+                    f"Full result: {result}"
+                )
+
+                # B's peer list should contain A's wraith_id (its only neighbor)
+                output = json.loads(result["output"])
+                peer_ids = [p["wraith_id"] for p in output.get("peers", [])]
+                assert wraith_id in peer_ids, (
+                    f"Expected A's id '{wraith_id}' in B's peer list, got: {peer_ids}"
+                )
+            finally:
+                _cleanup_process(peer_proc)
+        finally:
+            wraith_client.disconnect()
+
+    def test_set_id_routes_to_remote_peer(
+        self,
+        wraith_client,
+        wraith_process,
+        wraith_binary_path,
+        wraith_peer_id,
+        wraith_peer_port,
+    ):
+        """Send set_id command to B through A; verify the command reaches B and executes.
+
+        This proves that command routing through the peer tunnel correctly forwards
+        the command to the remote wraith and returns its response.
+        """
+        wraith_client.connect()
+
+        try:
+            peer_proc = self._establish_peer_tunnel(
+                wraith_client, wraith_binary_path, wraith_peer_id, wraith_peer_port
+            )
+
+            try:
+                # Target B directly
+                wraith_client.set_target(wraith_peer_id)
+
+                # Send set_id to B
+                new_id = "renamed-peer"
+                success, result = wraith_client.set_id(new_id)
+                assert success, f"set_id routed to B failed: {result}"
+                assert result["status"] == "success", (
+                    f"Expected 'success' from set_id routed to B, "
+                    f"but got '{result['status']}'. "
+                    f"Full result: {result}"
+                )
+                assert result["output"] == new_id, (
+                    f"Expected output '{new_id}' but got '{result['output']}'"
+                )
+            finally:
+                _cleanup_process(peer_proc)
+        finally:
+            wraith_client.disconnect()

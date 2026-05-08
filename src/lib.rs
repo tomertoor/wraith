@@ -4,4 +4,5 @@ pub mod connection;
 pub mod message;
 pub mod proto;
 pub mod relay;
+pub mod router;
 pub mod wraith;

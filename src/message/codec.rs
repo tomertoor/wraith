@@ -139,6 +139,28 @@ impl MessageCodec {
         msg
     }
 
+    pub fn command_result_success(command_id: String, output: String) -> CommandResult {
+        CommandResult {
+            command_id,
+            status: "success".to_string(),
+            output,
+            exit_code: 0,
+            duration_ms: 0,
+            error: String::new(),
+        }
+    }
+
+    pub fn command_result_error(command_id: String, error: String) -> CommandResult {
+        CommandResult {
+            command_id,
+            status: "error".to_string(),
+            output: String::new(),
+            exit_code: -1,
+            duration_ms: 0,
+            error,
+        }
+    }
+
     pub fn create_relay_create(
         relay_id: String,
         config: RelayConfig,

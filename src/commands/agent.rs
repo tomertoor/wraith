@@ -1,7 +1,7 @@
-use crate::commands::command::Command;
+use crate::message::codec::MessageCodec;
 use crate::proto::wraith::{Command as ProtoCommand, CommandResult};
 use crate::wraith::state::WraithState;
-use crate::wraith::tunnel::TunnelManager;
+use crate::wraith::session::TunnelManager;
 use log::{debug, error, info};
 use std::sync::Arc;
 
@@ -22,27 +22,16 @@ impl AgentCommands {
     pub fn handle_set_id(&self, cmd: &ProtoCommand, state: &mut WraithState) -> CommandResult {
         let new_id = cmd.params.get("wraith_id").cloned().unwrap_or_default();
         if new_id.is_empty() {
-            return CommandResult {
-                command_id: cmd.command_id.clone(),
-                status: "error".to_string(),
-                output: String::new(),
-                exit_code: -1,
-                duration_ms: 0,
-                error: "wraith_id parameter required".to_string(),
-            };
+            return MessageCodec::command_result_error(
+                cmd.command_id.clone(),
+                "wraith_id parameter required".to_string(),
+            );
         }
 
         state.set_wraith_id(new_id.clone());
         info!("Wraith ID set to: {}", new_id);
 
-        CommandResult {
-            command_id: cmd.command_id.clone(),
-            status: "success".to_string(),
-            output: new_id,
-            exit_code: 0,
-            duration_ms: 0,
-            error: String::new(),
-        }
+        MessageCodec::command_result_success(cmd.command_id.clone(), new_id)
     }
 
     pub fn handle_list_peers(&self, cmd: &ProtoCommand, state: &WraithState) -> CommandResult {
@@ -62,14 +51,7 @@ impl AgentCommands {
 
         debug!("list_peers: {}", output);
 
-        CommandResult {
-            command_id: cmd.command_id.clone(),
-            status: "success".to_string(),
-            output,
-            exit_code: 0,
-            duration_ms: 0,
-            error: String::new(),
-        }
+        MessageCodec::command_result_success(cmd.command_id.clone(), output)
     }
 
     pub fn handle_wraith_listen(&self, cmd: &ProtoCommand) -> CommandResult {
@@ -83,14 +65,10 @@ impl AgentCommands {
             }
         });
 
-        CommandResult {
-            command_id: cmd.command_id.clone(),
-            status: "success".to_string(),
-            output: format!("Listening for peer connections on port {}", port),
-            exit_code: 0,
-            duration_ms: 0,
-            error: String::new(),
-        }
+        MessageCodec::command_result_success(
+            cmd.command_id.clone(),
+            format!("Listening for peer connections on port {}", port),
+        )
     }
 
     pub fn handle_wraith_connect(&self, cmd: &ProtoCommand, state: &WraithState) -> CommandResult {
@@ -98,14 +76,10 @@ impl AgentCommands {
         let port: u16 = cmd.params.get("port").and_then(|s| s.parse().ok()).unwrap_or(4445);
 
         if host.is_empty() {
-            return CommandResult {
-                command_id: cmd.command_id.clone(),
-                status: "error".to_string(),
-                output: String::new(),
-                exit_code: -1,
-                duration_ms: 0,
-                error: "host parameter required for wraith_connect".to_string(),
-            };
+            return MessageCodec::command_result_error(
+                cmd.command_id.clone(),
+                "host parameter required for wraith_connect".to_string(),
+            );
         }
 
         let addr = format!("{}:{}", host, port);
@@ -116,7 +90,6 @@ impl AgentCommands {
         let hostname = state.hostname.clone();
         let os = state.os.clone();
 
-        // Spawn async task to establish peer connection via TunnelManager
         tokio::spawn(async move {
             if let Err(e) = Arc::clone(&tunnel_manager).connect_to_peer(addr, wraith_id, hostname, os).await {
                 log::error!("Failed to connect to peer: {}", e);
@@ -130,25 +103,6 @@ impl AgentCommands {
             exit_code: 0,
             duration_ms: 0,
             error: String::new(),
-        }
-    }
-}
-
-impl Command for AgentCommands {
-    fn execute(&self, cmd: &ProtoCommand) -> CommandResult {
-        match cmd.action.as_str() {
-            "set_id" => self.handle_set_id(cmd, &mut WraithState::new()),
-            "list_peers" => self.handle_list_peers(cmd, &WraithState::new()),
-            "wraith_listen" => self.handle_wraith_listen(cmd),
-            "wraith_connect" => self.handle_wraith_connect(cmd, &WraithState::new()),
-            _ => CommandResult {
-                command_id: cmd.command_id.clone(),
-                status: "error".to_string(),
-                output: String::new(),
-                exit_code: -1,
-                duration_ms: 0,
-                error: format!("Unknown action: {}", cmd.action),
-            },
         }
     }
 }

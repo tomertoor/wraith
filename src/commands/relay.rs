@@ -1,7 +1,7 @@
-use crate::commands::command::Command;
+use crate::message::codec::MessageCodec;
 use crate::proto::wraith::{Command as ProtoCommand, CommandResult};
 use crate::relay::{RelayConfig, RelayEndpoint, RelayManager};
-use crate::wraith::tunnel::TunnelManager;
+use crate::wraith::session::TunnelManager;
 use log::{debug, info};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,19 +18,14 @@ impl RelayCommands {
         Self { relay_manager, tunnel_manager: Some(tunnel_manager) }
     }
 
-    /// Creates a RelayCommands without a tunnel_manager reference
     pub fn new_without_tunnel(relay_manager: Arc<Mutex<RelayManager>>) -> Self {
         Self { relay_manager, tunnel_manager: None }
     }
 
     pub fn handle_create_relay(&self, cmd: &ProtoCommand, local_wraith_id: &str) -> CommandResult {
-        // Hops come as: hop_0_listen_host, hop_0_listen_port, hop_0_forward_host, hop_0_forward_port, hop_0_protocol, hop_1_...
-        // Or legacy single-hop: listen_host, listen_port, forward_host, forward_port, protocol
         let mut hops: Vec<RelayConfig> = Vec::new();
 
-        // Check if we have hop-based params (new format) or legacy format
         if let Some(first_listen_host) = cmd.params.get("hop_0_listen_host") {
-            // New hop-based format
             let mut i = 0;
             while let Some(listen_host) = cmd.params.get(&format!("hop_{}_listen_host", i)) {
                 let listen_port: u16 = cmd.params
@@ -57,7 +52,6 @@ impl RelayCommands {
                 i += 1;
             }
         } else {
-            // Legacy single-hop format (backward compatible)
             let listen_host = cmd.params.get("listen_host").cloned().unwrap_or_default();
             let listen_port: u16 = cmd.params.get("listen_port").and_then(|s| s.parse().ok()).unwrap_or(0);
             let forward_host = cmd.params.get("forward_host").cloned().unwrap_or_default();
@@ -72,20 +66,14 @@ impl RelayCommands {
         }
 
         if hops.len() < 1 || (hops.len() == 1 && hops[0].listen.port == 0) {
-            return CommandResult {
-                command_id: cmd.command_id.clone(),
-                status: "error".to_string(),
-                output: String::new(),
-                exit_code: -1,
-                duration_ms: 0,
-                error: "Invalid relay configuration: no hops provided".to_string(),
-            };
+            return MessageCodec::command_result_error(
+                cmd.command_id.clone(),
+                "Invalid relay configuration: no hops provided".to_string(),
+            );
         }
 
-        // Check if this relay should be created on a remote wraith
         if let Some(target_id) = cmd.params.get("target_wraith_id") {
             if target_id != local_wraith_id {
-                // Return status indicating this needs to be routed
                 return CommandResult {
                     command_id: cmd.command_id.clone(),
                     status: "route_to_peer".to_string(),
@@ -100,19 +88,12 @@ impl RelayCommands {
         debug!("create_relay: {} hop(s)", hops.len());
 
         let relay_id = {
-            let mut manager = self.relay_manager.lock().unwrap();
+            let mut manager = self.relay_manager.lock().expect("relay_manager lock poisoned");
             manager.create_relay(hops.remove(0))
         };
 
         info!("Created relay with id: {}", relay_id);
-        CommandResult {
-            command_id: cmd.command_id.clone(),
-            status: "success".to_string(),
-            output: relay_id,
-            exit_code: 0,
-            duration_ms: 0,
-            error: String::new(),
-        }
+        MessageCodec::command_result_success(cmd.command_id.clone(), relay_id)
     }
 
     pub fn handle_delete_relay(&self, cmd: &ProtoCommand) -> CommandResult {
@@ -120,59 +101,26 @@ impl RelayCommands {
         debug!("delete_relay: id={}", relay_id);
 
         let deleted = {
-            let mut manager = self.relay_manager.lock().unwrap();
+            let mut manager = self.relay_manager.lock().expect("relay_manager lock poisoned");
             manager.delete_relay(&relay_id)
         };
 
         if deleted {
             info!("Deleted relay: {}", relay_id);
+            MessageCodec::command_result_success(cmd.command_id.clone(), String::new())
         } else {
             info!("Relay not found: {}", relay_id);
-        }
-
-        CommandResult {
-            command_id: cmd.command_id.clone(),
-            status: if deleted { "success" } else { "not_found" }.to_string(),
-            output: String::new(),
-            exit_code: if deleted { 0 } else { -1 },
-            duration_ms: 0,
-            error: if deleted { String::new() } else { "Relay not found".to_string() },
+            MessageCodec::command_result_error(cmd.command_id.clone(), "Relay not found".to_string())
         }
     }
 
     pub fn handle_list_relays(&self, cmd: &ProtoCommand) -> CommandResult {
         let relays = {
-            let manager = self.relay_manager.lock().unwrap();
+            let manager = self.relay_manager.lock().expect("relay_manager lock poisoned");
             manager.list_relays()
         };
 
         let output = serde_json::to_string(&relays).unwrap_or_default();
-
-        CommandResult {
-            command_id: cmd.command_id.clone(),
-            status: "success".to_string(),
-            output,
-            exit_code: 0,
-            duration_ms: 0,
-            error: String::new(),
-        }
-    }
-}
-
-impl Command for RelayCommands {
-    fn execute(&self, cmd: &ProtoCommand) -> CommandResult {
-        match cmd.action.as_str() {
-            "create_relay" => self.handle_create_relay(cmd, ""),
-            "delete_relay" => self.handle_delete_relay(cmd),
-            "list_relays" => self.handle_list_relays(cmd),
-            _ => CommandResult {
-                command_id: cmd.command_id.clone(),
-                status: "error".to_string(),
-                output: String::new(),
-                exit_code: -1,
-                duration_ms: 0,
-                error: format!("Unknown action: {}", cmd.action),
-            },
-        }
+        MessageCodec::command_result_success(cmd.command_id.clone(), output)
     }
 }
